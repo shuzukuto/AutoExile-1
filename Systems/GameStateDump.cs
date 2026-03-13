@@ -59,7 +59,7 @@ namespace AutoExile.Systems
         public int NearbyMonsterCount { get; set; }
         public int NearbyChaseCount { get; set; }
         public Vector2 PackCenter { get; set; }
-        public Vector2 NearbyPackCenter { get; set; }
+        public Vector2 DenseClusterCenter { get; set; }
         public string LastAction { get; set; } = "";
         public string LastSkillAction { get; set; } = "";
         public long? BestTargetId { get; set; }
@@ -515,8 +515,8 @@ namespace AutoExile.Systems
                     var pcy = (int)snapshot.Combat.PackCenter.Y - minY;
                     DrawCross(pixels, w, h, pcx, pcy, 5, Color.FromArgb(255, 255, 100, 100)); // light red X = pack center
 
-                    var npcx = (int)snapshot.Combat.NearbyPackCenter.X - minX;
-                    var npcy = (int)snapshot.Combat.NearbyPackCenter.Y - minY;
+                    var npcx = (int)snapshot.Combat.DenseClusterCenter.X - minX;
+                    var npcy = (int)snapshot.Combat.DenseClusterCenter.Y - minY;
                     DrawCross(pixels, w, h, npcx, npcy, 4, Color.FromArgb(255, 255, 200, 50)); // yellow X = nearby pack center
                 }
             }
@@ -645,7 +645,7 @@ namespace AutoExile.Systems
                         ["nearbyMonsterCount"] = snapshot.Combat.NearbyMonsterCount,
                         ["nearbyChaseCount"] = snapshot.Combat.NearbyChaseCount,
                         ["packCenter"] = new[] { Math.Round(snapshot.Combat.PackCenter.X, 1), Math.Round(snapshot.Combat.PackCenter.Y, 1) },
-                        ["nearbyPackCenter"] = new[] { Math.Round(snapshot.Combat.NearbyPackCenter.X, 1), Math.Round(snapshot.Combat.NearbyPackCenter.Y, 1) },
+                        ["nearbyPackCenter"] = new[] { Math.Round(snapshot.Combat.DenseClusterCenter.X, 1), Math.Round(snapshot.Combat.DenseClusterCenter.Y, 1) },
                         ["lastAction"] = snapshot.Combat.LastAction,
                         ["lastSkillAction"] = snapshot.Combat.LastSkillAction,
                         ["bestTargetId"] = snapshot.Combat.BestTargetId ?? 0L,

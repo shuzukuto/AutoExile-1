@@ -42,12 +42,6 @@ namespace AutoExile.Modes
         // Between-wave stash tracking
         private bool _isStashing;
 
-        // Patrol tracking — cycle through spawn zones during waves and between-wave loot sweeps
-        private Vector2? _currentPatrolTarget;
-        private DateTime _arrivedAtPatrolTarget = DateTime.MinValue;
-        private const float PatrolStaleSeconds = 8f; // move on if no monsters after this long
-        private int _patrolZonesVisitedWithoutMonsters; // reset when monsters found or patrol target set
-
         // Wave transition tracking — reset exploration seen state each wave so we re-sweep for new spawns
         private int _lastKnownWave;
         // Track whether we were searching (no monsters) last tick — reset exploration when
@@ -59,6 +53,11 @@ namespace AutoExile.Modes
         private const int MaxWaveStartAttempts = 10;
         private DateTime _betweenWaveStartTime = DateTime.MinValue;
         private const float BetweenWaveTimeoutSeconds = 120f;
+
+        // Combat stuck detection — if fighting same monsters too long, move on
+        private DateTime _combatEngageTime = DateTime.MinValue;
+        private int _combatEngageCount;
+        private const float CombatStuckSeconds = 15f;
 
 
         // Action cooldown
@@ -81,6 +80,9 @@ namespace AutoExile.Modes
             _wasSearching = false;
             _waveStartAttempts = 0;
             _betweenWaveStartTime = DateTime.MinValue;
+            _nudgedForMonolith = false;
+            _combatEngageTime = DateTime.MinValue;
+            _combatEngageCount = 0;
 
             // Enable combat
             ModeHelpers.EnableDefaultCombat(ctx);
@@ -122,7 +124,7 @@ namespace AutoExile.Modes
                 _lastAreaName = currentArea;
             }
 
-            // Always tick state + combat when in map
+            // Always tick state when in map; combat only during active phases
             bool inMap = gc.Area?.CurrentArea != null &&
                          !gc.Area.CurrentArea.IsHideout &&
                          !gc.Area.CurrentArea.IsTown;
@@ -130,10 +132,16 @@ namespace AutoExile.Modes
             {
                 _state.Tick(gc, _settings.MinWaveDelaySeconds.Value);
 
-                // Suppress combat repositioning when interaction is navigating to loot —
-                // otherwise combat move commands conflict with interaction navigation
-                ctx.Combat.SuppressPositioning = ctx.Interaction.IsBusy;
-                ctx.Combat.Tick(gc, ctx.Settings.Build);
+                // Disable combat during LootSweep/ExitMap — we need to navigate freely
+                // to pick up remaining items and reach the portal without being dragged into fights
+                bool combatAllowed = _phase != SimPhase.LootSweep && _phase != SimPhase.ExitMap;
+                if (combatAllowed)
+                {
+                    // Suppress cursor-moving skills when interaction is busy picking up loot
+                    ctx.Combat.SuppressPositioning = ctx.Interaction.IsBusy;
+                    ctx.Combat.SuppressTargetedSkills = ctx.Interaction.IsBusy;
+                    ctx.Combat.Tick(ctx);
+                }
             }
 
             // Tick interaction system
@@ -263,7 +271,6 @@ namespace AutoExile.Modes
             {
                 _phase = SimPhase.NavigateToMonolith;
                 _phaseStartTime = DateTime.Now;
-                _nudgedForMonolith = false;
                 StatusText = "Monolith found — navigating";
                 return;
             }
@@ -271,27 +278,27 @@ namespace AutoExile.Modes
             var gc = ctx.Game;
             var elapsed = (DateTime.Now - _phaseStartTime).TotalSeconds;
 
-            // After 2s settle, navigate to map center to find the monolith.
+            // After 2s settle, navigate to hardcoded map center to find the monolith.
             // Portal may spawn far from center — monolith is always near the middle.
             if (!_nudgedForMonolith && elapsed > 2)
             {
                 _nudgedForMonolith = true;
 
-                // Use exploration map center (weighted centroid of all walkable space)
-                var mapCenter = ctx.Exploration.IsInitialized ? ctx.Exploration.GetMapCenter() : null;
+                var mapCenter = SimulacrumState.GetMapCenter(gc.Area.CurrentArea.Name ?? "");
                 if (mapCenter.HasValue)
                 {
                     ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(mapCenter.Value));
-                    StatusText = $"Navigating to map center to find monolith";
+                    StatusText = $"Navigating to map center ({mapCenter.Value.X:F0}, {mapCenter.Value.Y:F0})";
                     ctx.Log($"FindMonolith: navigating to map center ({mapCenter.Value.X:F0}, {mapCenter.Value.Y:F0})");
                 }
                 else
                 {
-                    // Fallback: small nudge to trigger entity loading
+                    // Unknown map — small nudge to trigger entity loading
                     var playerGrid = gc.Player.GridPosNum;
                     var nudgeTarget = new Vector2(playerGrid.X + 5, playerGrid.Y) * Systems.Pathfinding.GridToWorld;
                     ctx.Navigation.NavigateTo(gc, nudgeTarget);
-                    StatusText = "Nudging to trigger entity loading...";
+                    StatusText = "Unknown map — nudging to trigger entity loading";
+                    ctx.Log($"FindMonolith: unknown map '{gc.Area.CurrentArea.Name}', nudging");
                 }
                 return;
             }
@@ -369,8 +376,6 @@ namespace AutoExile.Modes
             {
                 _lastKnownWave = _state.CurrentWave;
                 ctx.Exploration.ResetSeen();
-                _currentPatrolTarget = null;
-                _patrolZonesVisitedWithoutMonsters = 0;
                 _wasSearching = false;
                 _waveStartAttempts = 0;
                 _betweenWaveStartTime = DateTime.MinValue;
@@ -419,27 +424,50 @@ namespace AutoExile.Modes
                 // Stale cached entities far beyond network bubble shouldn't prevent patrolling
                 if (ctx.Combat.NearbyChaseCount > 0)
                 {
-                    // Found monsters after searching — reset exploration so next search
-                    // re-sweeps the whole map (monsters spawn in already-visited areas)
-                    if (_wasSearching)
+                    // Combat stuck detection: if monster count isn't decreasing, we're
+                    // probably fighting unreachable/unkillable monsters — move on
+                    if (_combatEngageTime == DateTime.MinValue || ctx.Combat.NearbyChaseCount < _combatEngageCount)
                     {
-                        ctx.Exploration.ResetSeen();
-                        _wasSearching = false;
+                        // First engagement or making progress — reset timer
+                        _combatEngageTime = DateTime.Now;
+                        _combatEngageCount = ctx.Combat.NearbyChaseCount;
                     }
 
-                    // Record nearby pack center for spawn zone tracking (not all cached entities)
-                    _state.RecordCombatPosition(ctx.Combat.NearbyPackCenter);
-                    _currentPatrolTarget = null; // reset patrol — re-evaluate after combat
-                    _patrolZonesVisitedWithoutMonsters = 0;
+                    var combatElapsed = (DateTime.Now - _combatEngageTime).TotalSeconds;
+                    if (combatElapsed > CombatStuckSeconds)
+                    {
+                        // Stuck fighting same monsters too long — treat as no monsters and explore elsewhere
+                        _combatEngageTime = DateTime.MinValue;
+                        _combatEngageCount = 0;
+                        if (!_wasSearching)
+                        {
+                            _wasSearching = true;
+                            ctx.Exploration.ResetSeen();
+                        }
+                        Decision = $"Wave {_state.CurrentWave} — combat stuck ({combatElapsed:F0}s), moving on ({ctx.Combat.NearbyChaseCount} unreachable)";
+                        TickExploreForMonsters(ctx);
+                    }
+                    else
+                    {
+                        _wasSearching = false;
 
-                    // Combat system handles fighting automatically via Tick above
-                    Decision = $"Wave {_state.CurrentWave} — fighting ({ctx.Combat.NearbyChaseCount} nearby, {ctx.Combat.NearbyMonsterCount} total)";
-                    StatusText = $"Wave {_state.CurrentWave}/15 — fighting {ctx.Combat.NearbyChaseCount} monsters";
+                        // Combat system handles fighting + positioning automatically via Tick above
+                        Decision = $"Wave {_state.CurrentWave} — fighting ({ctx.Combat.NearbyChaseCount} nearby, {ctx.Combat.NearbyMonsterCount} total)";
+                        StatusText = $"Wave {_state.CurrentWave}/15 — fighting {ctx.Combat.NearbyChaseCount} monsters";
+                    }
                 }
                 else
                 {
-                    _wasSearching = true;
-                    // No reachable monsters — patrol spawn zones to find them
+                    // Transition from fighting → searching: reset exploration so we re-sweep
+                    // the whole map (monsters spawn in areas we already visited)
+                    if (!_wasSearching)
+                    {
+                        _wasSearching = true;
+                        ctx.Exploration.ResetSeen();
+                    }
+                    _combatEngageTime = DateTime.MinValue;
+                    _combatEngageCount = 0;
+
                     Decision = $"Wave {_state.CurrentWave} — patrolling ({ctx.Combat.NearbyMonsterCount} distant)";
                     TickExploreForMonsters(ctx);
                 }
@@ -485,7 +513,7 @@ namespace AutoExile.Modes
 
                     // Either picking up or waiting — stay near spawn zones, don't wander to monolith
                     if (!ctx.Interaction.IsBusy)
-                        IdleAtSpawnZone(ctx);
+                        IdleNearMonolith(ctx);
                     Decision = pickingUp ? "Between waves — picking up loot" : "Between waves — clearing loot";
                     StatusText = pickingUp ? $"Picking up loot (between waves)" : "Loot nearby — clearing before next wave";
                     return;
@@ -555,7 +583,6 @@ namespace AutoExile.Modes
 
             if (DateTime.Now >= _state.CanStartWaveAt && _state.CurrentWave < 15)
             {
-                _waveStartAttempts++;
                 Decision = $"Wave {_state.CurrentWave}/15 → StartWave (attempt {_waveStartAttempts}/{MaxWaveStartAttempts})";
                 TickStartWave(ctx);
                 return;
@@ -564,97 +591,23 @@ namespace AutoExile.Modes
             // Waiting for wave delay (loot is clear, timer running)
             var waitRemaining = (_state.CanStartWaveAt - DateTime.Now).TotalSeconds;
             Decision = $"Loot clear — waiting ({waitRemaining:F1}s)";
-            IdleAtSpawnZone(ctx);
+            IdleNearMonolith(ctx);
             StatusText = $"Wave {_state.CurrentWave}/15 — loot clear, {waitRemaining:F1}s until next wave";
         }
 
         /// <summary>
-        /// Patrol through spawn zones when wave is active but no monsters visible.
-        /// Cycles through known spawn zones, spending PatrolStaleSeconds at each before
-        /// moving to the next. Falls back to exploration if no spawn data yet.
+        /// Find and navigate to monsters when none are in chase range.
+        /// Three-tier fallback: cached distant monsters → reset exploration and explore → orbit monolith.
         /// </summary>
         private void TickExploreForMonsters(BotContext ctx)
         {
             var gc = ctx.Game;
             var playerPos = gc.Player.GridPosNum;
 
-            // If we have spawn zone data, patrol between them
-            if (_state.HasSpawnData)
-            {
-                // Pick a patrol target if we don't have one
-                if (!_currentPatrolTarget.HasValue)
-                {
-                    _currentPatrolTarget = _state.GetNextPatrolTarget(playerPos, null);
-                    _arrivedAtPatrolTarget = DateTime.MinValue;
-                }
-
-                if (_currentPatrolTarget.HasValue)
-                {
-                    var dist = Vector2.Distance(playerPos, _currentPatrolTarget.Value);
-
-                    if (dist > 25f)
-                    {
-                        // Navigate to patrol target
-                        _arrivedAtPatrolTarget = DateTime.MinValue;
-                        if (!ctx.Navigation.IsNavigating)
-                            ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(_currentPatrolTarget.Value));
-                        StatusText = $"Wave {_state.CurrentWave}/15 — patrolling to spawn zone (dist: {dist:F0})";
-                        return;
-                    }
-
-                    // Arrived at patrol target — wait for monsters (but skip wait if none exist at all)
-                    if (_arrivedAtPatrolTarget == DateTime.MinValue)
-                        _arrivedAtPatrolTarget = DateTime.Now;
-
-                    // If there are zero monsters in the entity list, don't waste time waiting
-                    // at each spawn zone. Move on immediately to sweep faster.
-                    var maxWait = ctx.Combat.NearbyMonsterCount > 0 ? PatrolStaleSeconds : 1f;
-                    var idleTime = (DateTime.Now - _arrivedAtPatrolTarget).TotalSeconds;
-                    if (idleTime < maxWait)
-                    {
-                        if (ctx.Navigation.IsNavigating)
-                            ctx.Navigation.Stop(gc);
-                        StatusText = $"Wave {_state.CurrentWave}/15 — at spawn zone, waiting ({idleTime:F0}s/{maxWait:F0}s)";
-                        return;
-                    }
-
-                    // Stale — if distant monsters are visible, chase them directly
-                    // instead of cycling through spawn zones that may not cover new spawn locations
-                    if (ctx.Combat.NearbyMonsterCount > 0)
-                    {
-                        _currentPatrolTarget = null;
-                        // Fall through to distant monster chase below
-                    }
-                    else
-                    {
-                        _patrolZonesVisitedWithoutMonsters++;
-
-                        // After visiting all spawn zones once with no monsters, fall through
-                        // to exploration/orbit instead of cycling the same empty zones forever
-                        if (_patrolZonesVisitedWithoutMonsters >= _state.SpawnZones.Count)
-                        {
-                            _currentPatrolTarget = null;
-                            _patrolZonesVisitedWithoutMonsters = 0;
-                            // Fall through to exploration below
-                        }
-                        else
-                        {
-                            // More zones to check — move to next spawn zone
-                            var lastTarget = _currentPatrolTarget;
-                            _currentPatrolTarget = _state.GetNextPatrolTarget(playerPos, lastTarget);
-                            _arrivedAtPatrolTarget = DateTime.MinValue;
-                            StatusText = $"Wave {_state.CurrentWave}/15 — spawn zone empty, moving to next ({_patrolZonesVisitedWithoutMonsters}/{_state.SpawnZones.Count})";
-                            return;
-                        }
-                    }
-                }
-            }
-
-            // Distant monsters exist — navigate toward their center of mass
-            // PackCenter tracks ALL alive monsters, not just nearby ones within chase radius.
-            // This prevents the bot from idling near the monolith while monsters are alive elsewhere.
+            // Tier 1: Cached distant monsters exist — navigate toward them to clear them
             if (ctx.Combat.NearbyMonsterCount > 0)
             {
+                _wasSearching = true;
                 var packDist = Vector2.Distance(playerPos, ctx.Combat.PackCenter);
                 if (packDist > 20f && !ctx.Navigation.IsNavigating)
                     ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(ctx.Combat.PackCenter));
@@ -662,17 +615,16 @@ namespace AutoExile.Modes
                 return;
             }
 
-            // No monsters visible — actively explore to find them.
-            // Never idle during an active wave; always be moving.
+            // Tier 2: No cached monsters — explore to find stragglers
+            // (ResetSeen already called at the fighting→searching transition above)
 
-            // If already navigating somewhere, let it finish before picking a new target
+            // Let current navigation finish before picking a new target
             if (ctx.Navigation.IsNavigating)
             {
                 StatusText = $"Wave {_state.CurrentWave}/15 — searching for monsters";
                 return;
             }
 
-            // Try exploration map first — it knows which areas haven't been visited
             if (ctx.Exploration.IsInitialized)
             {
                 var target = ctx.Exploration.GetNextExplorationTarget(playerPos);
@@ -684,22 +636,19 @@ namespace AutoExile.Modes
                 }
             }
 
-            // Exploration exhausted — orbit the monolith at medium range to cover spawns
+            // Tier 3: Exploration exhausted — orbit the monolith
             if (_state.MonolithPosition.HasValue)
             {
                 var distToMonolith = Vector2.Distance(playerPos, _state.MonolithPosition.Value);
-                // If far from monolith, return to it
                 if (distToMonolith > 80f)
                 {
                     ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(_state.MonolithPosition.Value));
                     StatusText = $"Wave {_state.CurrentWave}/15 — returning to monolith (dist: {distToMonolith:F0})";
                     return;
                 }
-                // If close to monolith, orbit at ~50 grid to sweep nearby area
                 if (distToMonolith < 30f)
                 {
-                    // Pick a random direction to move outward
-                    var angle = (float)(DateTime.Now.Ticks % 6283) / 1000f; // pseudo-random angle from time
+                    var angle = (float)(DateTime.Now.Ticks % 6283) / 1000f;
                     var orbitTarget = _state.MonolithPosition.Value + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 50f;
                     ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(orbitTarget));
                     StatusText = $"Wave {_state.CurrentWave}/15 — orbiting monolith for monsters";
@@ -711,31 +660,24 @@ namespace AutoExile.Modes
         }
 
         /// <summary>
-        /// Navigate to the nearest spawn zone and idle there between waves.
-        /// Positions us where monsters spawn so we're ready when the next wave starts.
+        /// Idle near the monolith between waves.
         /// </summary>
-        private void IdleAtSpawnZone(BotContext ctx)
+        private void IdleNearMonolith(BotContext ctx)
         {
+            if (!_state.MonolithPosition.HasValue) return;
             var gc = ctx.Game;
-            var playerPos = gc.Player.GridPosNum;
-            var idlePos = _state.GetNearestSpawnZone(playerPos);
-            if (!idlePos.HasValue) return;
+            var dist = Vector2.Distance(gc.Player.GridPosNum, _state.MonolithPosition.Value);
 
-            var dist = Vector2.Distance(playerPos, idlePos.Value);
-
-            if (dist < 20f)
-            {
-                if (ctx.Navigation.IsNavigating)
-                    ctx.Navigation.Stop(gc);
-                return;
-            }
-
-            if (!ctx.Navigation.IsNavigating)
-                ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(idlePos.Value));
+            if (dist > 30f && !ctx.Navigation.IsNavigating)
+                ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(_state.MonolithPosition.Value));
+            else if (dist <= 20f && ctx.Navigation.IsNavigating)
+                ctx.Navigation.Stop(gc);
         }
 
         /// <summary>
         /// Navigate to monolith and click it to start the next wave.
+        /// Tries entity label first (most reliable), falls back to WorldToScreen click.
+        /// Only increments _waveStartAttempts when a click is actually sent.
         /// </summary>
         private void TickStartWave(BotContext ctx)
         {
@@ -763,7 +705,7 @@ namespace AutoExile.Modes
 
             if (!ModeHelpers.CanAct(_lastActionTime, MajorActionCooldownMs)) return;
 
-            // Resolve monolith entity for clicking
+            // Resolve monolith entity
             Entity? monolith = null;
             if (_state.MonolithId.HasValue)
             {
@@ -776,15 +718,74 @@ namespace AutoExile.Modes
                     .FirstOrDefault(e => e.Metadata?.Contains("Objects/Afflictionator") == true);
             }
 
-            if (monolith != null)
-            {
-                ModeHelpers.ClickEntity(gc, monolith, ref _lastActionTime);
-                StatusText = $"Clicking monolith to start wave {_state.CurrentWave + 1}";
-            }
-            else
+            if (monolith == null)
             {
                 StatusText = "Monolith entity not found for clicking";
+                return;
             }
+
+            // Try 1: Click entity label if visible (game renders a hoverable label on the monolith)
+            if (TryClickEntityLabel(gc, monolith))
+            {
+                _waveStartAttempts++;
+                StatusText = $"Clicking monolith label to start wave {_state.CurrentWave + 1} (attempt {_waveStartAttempts})";
+                return;
+            }
+
+            // Try 2: Click via WorldToScreen with bounds check
+            var screenPos = gc.IngameState.Camera.WorldToScreen(monolith.BoundsCenterPosNum);
+            var windowRect = gc.Window.GetWindowRectangle();
+
+            // Screen bounds check
+            if (screenPos.X < 10 || screenPos.X > windowRect.Width - 10 ||
+                screenPos.Y < 10 || screenPos.Y > windowRect.Height - 10)
+            {
+                StatusText = $"Monolith off screen — waiting";
+                return;
+            }
+
+            var absPos = new Vector2(windowRect.X + screenPos.X, windowRect.Y + screenPos.Y);
+            if (BotInput.Click(absPos))
+            {
+                _lastActionTime = DateTime.Now;
+                _waveStartAttempts++;
+                StatusText = $"Clicking monolith to start wave {_state.CurrentWave + 1} (attempt {_waveStartAttempts})";
+            }
+        }
+
+        /// <summary>
+        /// Try to find and click the monolith's interaction label rendered by the game.
+        /// These show up in the VisibleGroundItemLabels list for interactable entities.
+        /// </summary>
+        private bool TryClickEntityLabel(GameController gc, Entity monolith)
+        {
+            try
+            {
+                var labels = gc.IngameState.IngameUi.ItemsOnGroundLabelElement.VisibleGroundItemLabels;
+                if (labels == null) return false;
+
+                foreach (var label in labels)
+                {
+                    if (label.Entity?.Id != monolith.Id) continue;
+                    if (label.Label == null || !label.Label.IsVisible) continue;
+
+                    var labelRect = label.ClientRect;
+                    var clickPos = new Vector2(
+                        labelRect.X + labelRect.Width / 2f,
+                        labelRect.Y + labelRect.Height / 2f);
+                    var windowRect = gc.Window.GetWindowRectangle();
+                    var absPos = new Vector2(windowRect.X + clickPos.X, windowRect.Y + clickPos.Y);
+
+                    if (BotInput.Click(absPos))
+                    {
+                        _lastActionTime = DateTime.Now;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            catch { }
+            return false;
         }
 
         // =================================================================
@@ -1071,18 +1072,6 @@ namespace AutoExile.Modes
                     SharpDX.Color.Gold);
             }
 
-            // Spawn zones (patrol targets)
-            for (int i = 0; i < _state.SpawnZones.Count; i++)
-            {
-                var zone = _state.SpawnZones[i];
-                var zoneWorld = SimulacrumState.ToWorld3(zone, playerZ);
-                var isCurrentTarget = _currentPatrolTarget.HasValue &&
-                    Vector2.Distance(zone, _currentPatrolTarget.Value) < 30f;
-                var color = isCurrentTarget ? SharpDX.Color.OrangeRed : SharpDX.Color.Orange;
-                g.DrawText($"SPAWN {i + 1}", cam.WorldToScreen(zoneWorld) + new Vector2(-25, -15), color);
-                g.DrawCircleInWorld(zoneWorld, 25f, color, isCurrentTarget ? 2f : 1f);
-            }
-
             // Navigation path
             if (ctx.Navigation.IsNavigating)
             {
@@ -1101,6 +1090,40 @@ namespace AutoExile.Modes
             g.DrawText($"Monsters: {ctx.Combat.NearbyMonsterCount}",
                 new Vector2(hudX, hudY), SharpDX.Color.Gray);
             hudY += lineH;
+
+            // Failed loot count
+            if (ctx.Loot.FailedCount > 0)
+            {
+                g.DrawText($"Ignored items: {ctx.Loot.FailedCount}",
+                    new Vector2(hudX, hudY), SharpDX.Color.OrangeRed);
+                hudY += lineH;
+            }
+
+            // Draw failed/ignored items in world with reason labels
+            foreach (var entry in ctx.Loot.FailedEntries.Values)
+            {
+                // Find the entity to get its world position
+                Entity? failedEntity = null;
+                foreach (var e in gc.EntityListWrapper.OnlyValidEntities)
+                {
+                    if (e.Id == entry.EntityId)
+                    {
+                        failedEntity = e;
+                        break;
+                    }
+                }
+                if (failedEntity == null) continue;
+
+                var worldPos = failedEntity.BoundsCenterPosNum;
+                var screenPos = cam.WorldToScreen(worldPos);
+                if (screenPos.X < 0 || screenPos.X > gc.Window.GetWindowRectangle().Width ||
+                    screenPos.Y < 0 || screenPos.Y > gc.Window.GetWindowRectangle().Height)
+                    continue;
+
+                var age = (DateTime.Now - entry.FailedAt).TotalSeconds;
+                g.DrawText($"X {entry.Reason} ({age:F0}s ago)",
+                    screenPos + new Vector2(5, -10), SharpDX.Color.OrangeRed);
+            }
         }
 
     }

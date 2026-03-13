@@ -30,7 +30,7 @@ namespace AutoExile.Systems
         /// Minimum distance to click entities/items (grid units). Synced from LootRadius setting.
         /// Navigation gets as close as possible; if within this range, clicks directly.
         /// </summary>
-        public float InteractRadius { get; set; } = 35f;
+        public float InteractRadius { get; set; } = 20f;
         private const float TimeoutDirect = 5f; // seconds — short timeout for range clicks
         private const float TimeoutClickBuffer = 5f; // seconds added on top of travel estimate
         private const float MinTimeoutNavigate = 10f; // minimum navigate timeout
@@ -40,6 +40,12 @@ namespace AutoExile.Systems
         // State
         public bool IsBusy => _currentTarget != null;
         public string Status { get; private set; } = "";
+
+        /// <summary>
+        /// Reason for the last failure. Set when returning InteractionResult.Failed.
+        /// Read by LootPickupTracker to pass to MarkFailed.
+        /// </summary>
+        public string LastFailReason { get; private set; } = "";
 
         /// <summary>
         /// Request to interact with a world entity (chest, shrine, transition, NPC, etc.).
@@ -120,6 +126,7 @@ namespace AutoExile.Systems
             if ((DateTime.Now - _interactionStartTime).TotalSeconds > _currentTimeout)
             {
                 Status = $"Interaction timed out ({_currentTimeout:F0}s)";
+                LastFailReason = $"timeout ({_currentTimeout:F0}s, {_clickAttempts} clicks)";
                 Cancel(gc);
                 return InteractionResult.Failed;
             }
@@ -176,6 +183,7 @@ namespace AutoExile.Systems
                     return InteractionResult.Succeeded;
                 }
                 Status = "Item not in entity list — skipping";
+                LastFailReason = "entity gone before click";
                 _currentTarget = null;
                 return InteractionResult.Failed;
             }
@@ -191,6 +199,7 @@ namespace AutoExile.Systems
                     if (!success)
                     {
                         Status = "No path to target";
+                        LastFailReason = "no path";
                         _currentTarget = null;
                         return InteractionResult.Failed;
                     }
@@ -211,6 +220,7 @@ namespace AutoExile.Systems
             {
                 // No nav system — can't navigate, just fail if too far
                 Status = "Too far and no navigation available";
+                LastFailReason = "too far, no nav";
                 _currentTarget = null;
                 return InteractionResult.Failed;
             }
@@ -262,6 +272,7 @@ namespace AutoExile.Systems
                     return InteractionResult.InProgress;
                 }
                 Status = "Item label not visible";
+                LastFailReason = "label not visible";
                 _currentTarget = null;
                 return InteractionResult.Failed;
             }
@@ -269,6 +280,7 @@ namespace AutoExile.Systems
             if (_clickAttempts >= MaxClickAttempts)
             {
                 Status = "Failed to pick up item";
+                LastFailReason = $"max clicks ({MaxClickAttempts})";
                 _currentTarget = null;
                 return InteractionResult.Failed;
             }
@@ -283,6 +295,7 @@ namespace AutoExile.Systems
             if (IsBlockedByUI(gc, clickPos))
             {
                 Status = "Label blocked by UI";
+                LastFailReason = "blocked by UI";
                 _currentTarget = null;
                 return InteractionResult.Failed;
             }

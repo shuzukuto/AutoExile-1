@@ -46,7 +46,7 @@ namespace AutoExile.Modes
 
             // Tick combat system if profile is enabled
             if (ctx.Combat.Profile.Enabled)
-                ctx.Combat.Tick(ctx.Game, ctx.Settings.Build);
+                ctx.Combat.Tick(ctx);
 
             // Cache path for rendering
             _renderNavPath = new List<NavWaypoint>(ctx.Navigation.CurrentNavPath);

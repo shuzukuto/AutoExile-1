@@ -554,6 +554,91 @@ namespace AutoExile.Systems
             LastRecoveryAction = "Micro-move";
         }
 
+        // ═══════════════════════════════════════════════════
+        // Terrain queries — used by CombatSystem for position validation
+        // ═══════════════════════════════════════════════════
+
+        /// <summary>
+        /// Check if a grid cell is walkable (pathfinding value >= 3).
+        /// Returns false if terrain data is unavailable.
+        /// </summary>
+        public bool IsWalkable(GameController gc, int gx, int gy)
+        {
+            var pfGrid = gc.IngameState.Data.RawFramePathfindingData;
+            if (pfGrid == null) return false;
+            return Pathfinding.IsWalkableCell(pfGrid, gx, gy);
+        }
+
+        /// <summary>
+        /// Check targeting-layer LOS between two grid positions.
+        /// Returns true if skills/projectiles can pass between A and B (targeting > 0 along line).
+        /// Returns false if terrain data unavailable.
+        /// </summary>
+        public bool HasTargetingLOS(GameController gc, Vector2 gridA, Vector2 gridB)
+        {
+            var tgtGrid = gc.IngameState.Data.RawTerrainTargetingData;
+            if (tgtGrid == null) return true; // graceful degradation
+            return Pathfinding.HasTargetingLOS(tgtGrid,
+                (int)gridA.X, (int)gridA.Y, (int)gridB.X, (int)gridB.Y);
+        }
+
+        /// <summary>
+        /// Find the nearest walkable cell to a grid position within searchRadius.
+        /// Returns null if nothing walkable found or terrain data unavailable.
+        /// </summary>
+        public Vector2? FindNearestWalkable(GameController gc, Vector2 gridPos, int searchRadius = 10)
+        {
+            var pfGrid = gc.IngameState.Data.RawFramePathfindingData;
+            if (pfGrid == null) return null;
+            var result = Pathfinding.FindNearestWalkableCell(pfGrid, (int)gridPos.X, (int)gridPos.Y, searchRadius);
+            if (result == null) return null;
+            return new Vector2(result.Value.x, result.Value.y);
+        }
+
+        /// <summary>
+        /// Find the nearest walkable cell that also has targeting LOS to a target grid position.
+        /// Used by CombatSystem to find valid attack positions.
+        /// </summary>
+        public Vector2? FindWalkableWithLOS(GameController gc, Vector2 gridPos, Vector2 losTarget, int searchRadius = 10)
+        {
+            var pfGrid = gc.IngameState.Data.RawFramePathfindingData;
+            var tgtGrid = gc.IngameState.Data.RawTerrainTargetingData;
+            if (pfGrid == null) return null;
+
+            int gx = (int)gridPos.X, gy = (int)gridPos.Y;
+            int tx = (int)losTarget.X, ty = (int)losTarget.Y;
+
+            // Check the position itself first
+            if (Pathfinding.IsWalkableCell(pfGrid, gx, gy) &&
+                (tgtGrid == null || Pathfinding.HasTargetingLOS(tgtGrid, gx, gy, tx, ty)))
+                return gridPos;
+
+            // Search expanding rings
+            float bestDist = float.MaxValue;
+            Vector2? best = null;
+            for (int r = 1; r <= searchRadius; r++)
+            {
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    for (int dy = -r; dy <= r; dy++)
+                    {
+                        if (Math.Abs(dx) != r && Math.Abs(dy) != r) continue;
+                        int cx = gx + dx, cy = gy + dy;
+                        if (!Pathfinding.IsWalkableCell(pfGrid, cx, cy)) continue;
+                        if (tgtGrid != null && !Pathfinding.HasTargetingLOS(tgtGrid, cx, cy, tx, ty)) continue;
+                        float dist = dx * dx + dy * dy;
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            best = new Vector2(cx, cy);
+                        }
+                    }
+                }
+                if (best.HasValue) return best; // found on this ring, closest possible
+            }
+            return best;
+        }
+
         public bool NavigateToTile(GameController gc, TileMap tileMap, string searchString)
         {
             var playerGridPos = gc.Player.GridPosNum;

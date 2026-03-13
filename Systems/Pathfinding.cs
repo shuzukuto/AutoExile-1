@@ -368,6 +368,76 @@ namespace AutoExile.Systems
             return true;
         }
 
+        /// <summary>
+        /// Check if a grid cell is walkable (pathfinding value >= 3).
+        /// Values 1-2 are wall fringe cells that cause clipping.
+        /// Grid layout: data[y][x].
+        /// </summary>
+        public static bool IsWalkableCell(int[][] pfGrid, int gx, int gy)
+        {
+            if (gy < 0 || gy >= pfGrid.Length) return false;
+            if (gx < 0 || gx >= pfGrid[gy].Length) return false;
+            return pfGrid[gy][gx] >= 3;
+        }
+
+        /// <summary>
+        /// Check targeting-layer line of sight between two grid positions.
+        /// Returns true if all cells along the Bresenham line have targeting value > 0,
+        /// meaning skills/projectiles can pass through. Does NOT imply walkability.
+        /// </summary>
+        public static bool HasTargetingLOS(int[][] tgtGrid, int gx1, int gy1, int gx2, int gy2)
+        {
+            int rows = tgtGrid.Length;
+            if (rows == 0) return false;
+            int cols = tgtGrid[0].Length;
+
+            var dx = Math.Abs(gx2 - gx1);
+            var dy = Math.Abs(gy2 - gy1);
+            var sx = gx1 < gx2 ? 1 : -1;
+            var sy = gy1 < gy2 ? 1 : -1;
+            var err = dx - dy;
+
+            var cx = gx1;
+            var cy = gy1;
+
+            while (cx != gx2 || cy != gy2)
+            {
+                if (cx < 0 || cx >= cols || cy < 0 || cy >= rows || tgtGrid[cy][cx] == 0)
+                    return false;
+
+                var e2 = 2 * err;
+                if (e2 > -dy) { err -= dy; cx += sx; }
+                if (e2 < dx) { err += dx; cy += sy; }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Find the nearest walkable cell (pf >= 3) within searchRadius of the given grid position.
+        /// Returns null if nothing walkable found. Searches in expanding rings.
+        /// </summary>
+        public static (int x, int y)? FindNearestWalkableCell(int[][] pfGrid, int gx, int gy, int searchRadius = 10)
+        {
+            if (IsWalkableCell(pfGrid, gx, gy))
+                return (gx, gy);
+
+            for (int r = 1; r <= searchRadius; r++)
+            {
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    for (int dy = -r; dy <= r; dy++)
+                    {
+                        if (Math.Abs(dx) != r && Math.Abs(dy) != r) continue; // ring only
+                        if (IsWalkableCell(pfGrid, gx + dx, gy + dy))
+                            return (gx + dx, gy + dy);
+                    }
+                }
+            }
+
+            return null;
+        }
+
         private static float Heuristic(int ax, int ay, int bx, int by)
         {
             var dx = Math.Abs(ax - bx);

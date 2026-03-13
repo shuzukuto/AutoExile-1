@@ -147,8 +147,10 @@ namespace AutoExile.Modes
             if (EnableCombat)
             {
                 // Suppress repositioning when we're navigating (following leader or heading to transition)
+                // Suppress targeted skills during loot pickup to avoid cursor interference
                 ctx.Combat.SuppressPositioning = ctx.Navigation.IsNavigating || ctx.Interaction.IsBusy;
-                ctx.Combat.Tick(gc, ctx.Settings.Build);
+                ctx.Combat.SuppressTargetedSkills = ctx.Interaction.IsBusy;
+                ctx.Combat.Tick(ctx);
             }
 
             // Tick interaction system (for transition clicks and loot pickups)

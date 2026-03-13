@@ -15,6 +15,31 @@ namespace AutoExile.Systems
     /// </summary>
     public class SimulacrumState
     {
+        // Hardcoded map centers — monolith is always near the center of each simulacrum map
+        private static readonly Dictionary<string, Vector2> MapCenters = new()
+        {
+            { "The Bridge Enraptured", new Vector2(551, 624) },
+            { "Oriath Delusion", new Vector2(494, 288) },
+            { "The Syndrome Encampment", new Vector2(316, 253) },
+            { "Hysteriagate", new Vector2(183, 269) },
+            { "Lunacy's Watch", new Vector2(270, 687) },
+        };
+
+        /// <summary>
+        /// Get the hardcoded center position for a simulacrum map by area name.
+        /// Returns null for unknown maps.
+        /// </summary>
+        public static Vector2? GetMapCenter(string areaName)
+        {
+            if (string.IsNullOrEmpty(areaName)) return null;
+            foreach (var kvp in MapCenters)
+            {
+                if (areaName.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase))
+                    return kvp.Value;
+            }
+            return null;
+        }
+
         // Entity tracking — ID + grid position
         public long? MonolithId { get; private set; }
         public long? PortalId { get; private set; }
@@ -41,163 +66,6 @@ namespace AutoExile.Systems
         // Position sanity
         private const float PositionSanityThreshold = 50f;
 
-        // Spawn zone tracking — grid heatmap bucketed into cells, then clustered
-        // into distinct spawn zones for patrol routing
-        private const int HeatmapCellSize = 30; // ~30 grid units per bucket
-        private const int MinHotspotSamples = 10;
-        private const int MaxSpawnZones = 6;
-        private const float ZoneMergeDistance = 50f; // grid units — merge clusters closer than this
-        private readonly Dictionary<(int x, int y), int> _heatmap = new();
-        private int _totalSamples;
-        private bool _zonesDirty;
-
-        /// <summary>
-        /// Distinct spawn zones ranked by density. Patrol through these during waves.
-        /// Each is a grid position at the center of a high-activity cluster.
-        /// </summary>
-        public List<Vector2> SpawnZones { get; private set; } = new();
-
-        /// <summary>
-        /// True once we have enough data to provide meaningful spawn zones.
-        /// </summary>
-        public bool HasSpawnData => _totalSamples >= MinHotspotSamples && SpawnZones.Count > 0;
-
-        /// <summary>
-        /// Record monster pack center during combat each tick.
-        /// Buckets into a heatmap grid, then clusters into spawn zones.
-        /// </summary>
-        public void RecordCombatPosition(Vector2 packCenterGrid)
-        {
-            var cellX = (int)MathF.Floor(packCenterGrid.X / HeatmapCellSize);
-            var cellY = (int)MathF.Floor(packCenterGrid.Y / HeatmapCellSize);
-            var key = (cellX, cellY);
-
-            _heatmap.TryGetValue(key, out var count);
-            _heatmap[key] = count + 1;
-            _totalSamples++;
-            _zonesDirty = true;
-        }
-
-        /// <summary>
-        /// Get the next patrol target. Cycles through spawn zones, picking the farthest
-        /// unvisited one from the player to ensure we sweep all lanes.
-        /// Returns null if no spawn data yet.
-        /// </summary>
-        public Vector2? GetNextPatrolTarget(Vector2 playerGridPos, Vector2? lastTarget)
-        {
-            if (_zonesDirty && _totalSamples >= MinHotspotSamples)
-                RebuildSpawnZones();
-
-            if (SpawnZones.Count == 0)
-                return null;
-
-            // If we just arrived at lastTarget (or no target), pick the farthest zone
-            // from current position. This creates a natural patrol sweep across the map.
-            float bestDist = -1;
-            Vector2? best = null;
-            foreach (var zone in SpawnZones)
-            {
-                // Skip the zone we just came from (if close to it)
-                if (lastTarget.HasValue && Vector2.Distance(zone, lastTarget.Value) < 30f)
-                    continue;
-
-                var dist = Vector2.Distance(zone, playerGridPos);
-                if (dist > bestDist)
-                {
-                    bestDist = dist;
-                    best = zone;
-                }
-            }
-
-            return best ?? SpawnZones[0];
-        }
-
-        /// <summary>
-        /// Get the nearest spawn zone to idle at between waves.
-        /// </summary>
-        public Vector2? GetNearestSpawnZone(Vector2 playerGridPos)
-        {
-            if (_zonesDirty && _totalSamples >= MinHotspotSamples)
-                RebuildSpawnZones();
-
-            if (SpawnZones.Count == 0)
-                return MonolithPosition;
-
-            float bestDist = float.MaxValue;
-            Vector2? best = null;
-            foreach (var zone in SpawnZones)
-            {
-                var dist = Vector2.Distance(zone, playerGridPos);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = zone;
-                }
-            }
-            return best;
-        }
-
-        /// <summary>
-        /// Cluster heatmap cells into distinct spawn zones.
-        /// Uses 3x3 kernel scoring to find peaks, then merges nearby peaks.
-        /// </summary>
-        private void RebuildSpawnZones()
-        {
-            _zonesDirty = false;
-
-            // Score each cell with 3x3 kernel
-            var scored = new List<((int x, int y) cell, int score)>();
-            foreach (var (cell, _) in _heatmap)
-            {
-                int score = 0;
-                for (int dx = -1; dx <= 1; dx++)
-                    for (int dy = -1; dy <= 1; dy++)
-                    {
-                        if (_heatmap.TryGetValue((cell.x + dx, cell.y + dy), out var n))
-                            score += n;
-                    }
-                scored.Add((cell, score));
-            }
-
-            // Sort by score descending
-            scored.Sort((a, b) => b.score.CompareTo(a.score));
-
-            // Greedily pick top cells, merging nearby ones
-            var zones = new List<(Vector2 pos, int score)>();
-            foreach (var (cell, score) in scored)
-            {
-                var pos = new Vector2(
-                    cell.x * HeatmapCellSize + HeatmapCellSize / 2f,
-                    cell.y * HeatmapCellSize + HeatmapCellSize / 2f);
-
-                // Check if too close to an existing zone
-                bool merged = false;
-                for (int i = 0; i < zones.Count; i++)
-                {
-                    if (Vector2.Distance(pos, zones[i].pos) < ZoneMergeDistance)
-                    {
-                        // Weighted merge toward higher-scoring position
-                        var existing = zones[i];
-                        float totalScore = existing.score + score;
-                        var mergedPos = (existing.pos * existing.score + pos * score) / totalScore;
-                        zones[i] = (mergedPos, existing.score + score);
-                        merged = true;
-                        break;
-                    }
-                }
-
-                if (!merged && zones.Count < MaxSpawnZones)
-                    zones.Add((pos, score));
-
-                if (zones.Count >= MaxSpawnZones && merged)
-                    break; // enough zones, all new cells will merge into existing
-            }
-
-            // Sort by score descending (highest activity first)
-            zones.Sort((a, b) => b.score.CompareTo(a.score));
-            SpawnZones = zones.Select(z => z.pos).ToList();
-        }
-
         /// <summary>
         /// Reset the wave timer to now. Call when bot is paused/resumed to prevent
         /// wall-clock time during pause from triggering wave timeout.
@@ -222,10 +90,6 @@ namespace AutoExile.Systems
             DeathCount = 0;
             HighestWaveThisRun = 0;
             _lastMonolithUpdate = DateTime.MinValue;
-            _heatmap.Clear();
-            _totalSamples = 0;
-            _zonesDirty = false;
-            SpawnZones.Clear();
         }
 
         /// <summary>

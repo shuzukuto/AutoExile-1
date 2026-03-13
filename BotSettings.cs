@@ -259,7 +259,7 @@ namespace AutoExile
         public class LootSettings
         {
             [Menu("Loot Radius", "Click items within this grid distance without pathing. Items beyond this require navigation first.")]
-            public RangeNode<float> LootRadius { get; set; } = new RangeNode<float>(35f, 10f, 80f);
+            public RangeNode<float> LootRadius { get; set; } = new RangeNode<float>(20f, 10f, 80f);
 
             [Menu("Skip Low-Value Uniques", "Skip unique items below the minimum chaos value.")]
             public ToggleNode SkipLowValueUniques { get; set; } = new ToggleNode(false);

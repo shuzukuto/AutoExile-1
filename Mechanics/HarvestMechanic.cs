@@ -459,7 +459,7 @@ namespace AutoExile.Mechanics
             {
                 Status = "Waiting for active encounter to finish...";
                 // Run combat while waiting
-                ctx.Combat.Tick(gc, ctx.Settings.Build);
+                ctx.Combat.Tick(ctx);
                 return MechanicResult.InProgress;
             }
 
@@ -528,7 +528,7 @@ namespace AutoExile.Mechanics
             }
 
             // Run combat while navigating
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             if (!ctx.Navigation.IsNavigating)
             {
@@ -740,7 +740,7 @@ namespace AutoExile.Mechanics
             }
 
             // Run combat while waiting (monsters may already be spawning)
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             if ((DateTime.Now - _phaseStartTime).TotalSeconds > 5)
             {
@@ -788,7 +788,7 @@ namespace AutoExile.Mechanics
 
         private MechanicResult TickFighting(BotContext ctx, GameController gc)
         {
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             if (_currentPair?.Selected == null) return MechanicResult.Failed;
 
@@ -895,7 +895,7 @@ namespace AutoExile.Mechanics
             var elapsed = (DateTime.Now - _lootStartTime).TotalSeconds;
 
             // Run combat in case stragglers appear
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             // Scan for loot periodically
             if ((DateTime.Now - _lastLootScan).TotalMilliseconds >= 500)
@@ -1006,7 +1006,7 @@ namespace AutoExile.Mechanics
             }
 
             // Run combat while walking back
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             if (!ctx.Navigation.IsNavigating)
             {

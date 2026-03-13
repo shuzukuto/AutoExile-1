@@ -129,7 +129,7 @@ namespace AutoExile.Modes
                     && ctx.Combat.NearbyChaseCount > 0;
                 ctx.Combat.SuppressPositioning = !allowCombatMovement;
 
-                ctx.Combat.Tick(gc, ctx.Settings.Build);
+                ctx.Combat.Tick(ctx);
             }
 
             // Tick interaction system

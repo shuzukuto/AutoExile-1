@@ -31,7 +31,7 @@ namespace AutoExile.Systems
         /// Grid distance threshold for direct pickup vs navigation.
         /// Items within this radius are clicked directly; items beyond require pathing first.
         /// </summary>
-        public float LootRadius { get; set; } = 35f;
+        public float LootRadius { get; set; } = 20f;
 
         /// <summary>
         /// Skip quest items (heist contracts, etc.) during loot scans.
@@ -49,19 +49,28 @@ namespace AutoExile.Systems
         public IReadOnlyList<LootCandidate> Candidates => _candidates;
 
         // Failed pickup tracking — items that couldn't be picked up are skipped in future scans
-        private readonly HashSet<long> _failedEntityIds = new();
+        private readonly Dictionary<long, FailedLootEntry> _failedEntities = new();
 
-        public int FailedCount => _failedEntityIds.Count;
+        public int FailedCount => _failedEntities.Count;
+        public IReadOnlyDictionary<long, FailedLootEntry> FailedEntries => _failedEntities;
 
         /// <summary>
         /// Mark an entity as failed to pick up — it will be excluded from future scans.
         /// </summary>
-        public void MarkFailed(long entityId) => _failedEntityIds.Add(entityId);
+        public void MarkFailed(long entityId, string reason = "unknown")
+        {
+            _failedEntities[entityId] = new FailedLootEntry
+            {
+                EntityId = entityId,
+                Reason = reason,
+                FailedAt = DateTime.Now,
+            };
+        }
 
         /// <summary>
         /// Clear the failed entity list. Call on area change or phase reset.
         /// </summary>
-        public void ClearFailed() => _failedEntityIds.Clear();
+        public void ClearFailed() => _failedEntities.Clear();
 
         /// <summary>
         /// Scan visible ground items and build a prioritized pickup list.
@@ -104,7 +113,7 @@ namespace AutoExile.Systems
                         continue;
 
                     var worldItemEntity = label.Entity;
-                    if (_failedEntityIds.Contains(worldItemEntity.Id))
+                    if (_failedEntities.ContainsKey(worldItemEntity.Id))
                         continue;
 
                     var itemName = label.Label.Text ?? "?";
@@ -255,5 +264,12 @@ namespace AutoExile.Systems
         public double ChaosValue;
         public int InventorySlots = 1;
         public double ChaosPerSlot;
+    }
+
+    public class FailedLootEntry
+    {
+        public long EntityId;
+        public string Reason = "";
+        public DateTime FailedAt;
     }
 }

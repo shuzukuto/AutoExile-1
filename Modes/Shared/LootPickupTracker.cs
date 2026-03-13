@@ -44,7 +44,7 @@ namespace AutoExile.Modes.Shared
             }
             else if (result == InteractionResult.Failed)
             {
-                ctx.Loot.MarkFailed(_pendingEntityId);
+                ctx.Loot.MarkFailed(_pendingEntityId, ctx.Interaction.LastFailReason);
             }
 
             if (result == InteractionResult.Succeeded || result == InteractionResult.Failed)

@@ -30,8 +30,8 @@ namespace AutoExile.Systems
         /// <summary>Center of mass of ALL monster pack (grid coords). Used for skill targeting.</summary>
         public Vector2 PackCenter { get; private set; }
 
-        /// <summary>Center of mass of nearby monsters within chase radius (grid coords). Used for positioning.</summary>
-        public Vector2 NearbyPackCenter { get; private set; }
+        /// <summary>Position of the monster in the densest cluster within chase radius (grid coords). Used for positioning.</summary>
+        public Vector2 DenseClusterCenter { get; private set; }
 
         /// <summary>Nearest corpse position for offering skills (grid coords).</summary>
         public Vector2? NearestCorpse { get; private set; }
@@ -52,11 +52,18 @@ namespace AutoExile.Systems
         public string LastAction { get; private set; } = "";
 
         /// <summary>
-        /// When true, combat still scans threats and fires skills but skips repositioning.
+        /// When true, combat still scans threats but skips repositioning.
         /// Set by modes when another system (e.g. InteractionSystem) is navigating and
         /// combat movement would conflict.
         /// </summary>
         public bool SuppressPositioning { get; set; }
+
+        /// <summary>
+        /// When true, combat skips skills that require cursor movement (Enemy/Corpse targeted).
+        /// Self-cast skills still fire. Set by modes during loot pickup to prevent cursor
+        /// interference with click-based interactions.
+        /// </summary>
+        public bool SuppressTargetedSkills { get; set; }
 
         /// <summary>Debug: last skill execution detail.</summary>
         public string LastSkillAction { get; private set; } = "";
@@ -116,8 +123,11 @@ namespace AutoExile.Systems
         /// Main tick. Scans threats, executes skills, manages flasks, repositions.
         /// Returns true if combat actions were taken this tick.
         /// </summary>
-        public bool Tick(GameController gc, BotSettings.BuildSettings settings)
+        public bool Tick(BotContext ctx)
         {
+            var gc = ctx.Game;
+            var settings = ctx.Settings.Build;
+
             WantsToMove = false;
 
             if (!Profile.Enabled)
@@ -153,7 +163,7 @@ namespace AutoExile.Systems
             // Positioning — uses cursor + move key (same as NavigationSystem)
             // Suppressed when another system is navigating (e.g. loot pickup)
             if (!SuppressPositioning)
-                TickPositioning(gc, settings);
+                TickPositioning(ctx);
 
             return usedSkill;
         }
@@ -166,7 +176,7 @@ namespace AutoExile.Systems
             NearbyChaseCount = 0;
             BestTarget = null;
             PackCenter = Vector2.Zero;
-            NearbyPackCenter = Vector2.Zero;
+            DenseClusterCenter = Vector2.Zero;
             NearestCorpse = null;
             WantsToMove = false;
             LastAction = "";
@@ -212,6 +222,12 @@ namespace AutoExile.Systems
         /// </summary>
         private const float ChaseRadius = 80f;
 
+        /// <summary>Cluster radius for density calculation — monsters within this grid distance count as neighbors.</summary>
+        private const float DensityClusterRadius = 25f;
+
+        /// <summary>Positions of all nearby monsters within chase radius (reused buffer).</summary>
+        private readonly List<Vector2> _nearbyMonsterPositions = new();
+
         private void ScanThreats(GameController gc, BotSettings.BuildSettings settings)
         {
             var playerGrid = gc.Player.GridPosNum;
@@ -219,11 +235,12 @@ namespace AutoExile.Systems
             Entity? bestTarget = null;
             float bestScore = float.MinValue;
             int count = 0;
-            int nearbyCount = 0; // monsters within chase radius
+            int nearbyCount = 0;
             var packSum = Vector2.Zero;
-            var nearbyPackSum = Vector2.Zero; // only within chase radius
             float nearestCorpseDist = float.MaxValue;
             Vector2? nearestCorpse = null;
+
+            _nearbyMonsterPositions.Clear();
 
             foreach (var entity in gc.EntityListWrapper.OnlyValidEntities)
             {
@@ -251,7 +268,7 @@ namespace AutoExile.Systems
                 if (dist <= ChaseRadius)
                 {
                     nearbyCount++;
-                    nearbyPackSum += entity.GridPosNum;
+                    _nearbyMonsterPositions.Add(entity.GridPosNum);
                 }
 
                 // Score: rarity weight - distance penalty
@@ -276,8 +293,49 @@ namespace AutoExile.Systems
             BestTarget = bestTarget;
             InCombat = count > 0;
             PackCenter = count > 0 ? packSum / count : playerGrid;
-            NearbyPackCenter = nearbyCount > 0 ? nearbyPackSum / nearbyCount : PackCenter;
             NearestCorpse = nearestCorpse;
+
+            // Find densest cluster center — the monster position with the most neighbors
+            DenseClusterCenter = FindDensestPosition(_nearbyMonsterPositions, playerGrid);
+        }
+
+        /// <summary>
+        /// Find the position in the list that has the most neighbors within DensityClusterRadius.
+        /// Returns the position with highest neighbor count (density champion).
+        /// Falls back to centroid for 0-2 monsters.
+        /// </summary>
+        private Vector2 FindDensestPosition(List<Vector2> positions, Vector2 fallback)
+        {
+            if (positions.Count == 0) return fallback;
+            if (positions.Count <= 2)
+            {
+                var sum = Vector2.Zero;
+                foreach (var p in positions) sum += p;
+                return sum / positions.Count;
+            }
+
+            int bestNeighborCount = -1;
+            Vector2 bestPos = positions[0];
+
+            for (int i = 0; i < positions.Count; i++)
+            {
+                int neighborCount = 0;
+                for (int j = 0; j < positions.Count; j++)
+                {
+                    if (i == j) continue;
+                    if (Vector2.DistanceSquared(positions[i], positions[j]) <=
+                        DensityClusterRadius * DensityClusterRadius)
+                        neighborCount++;
+                }
+
+                if (neighborCount > bestNeighborCount)
+                {
+                    bestNeighborCount = neighborCount;
+                    bestPos = positions[i];
+                }
+            }
+
+            return bestPos;
         }
 
         // ═══════════════════════════════════════════════════
@@ -459,6 +517,10 @@ namespace AutoExile.Systems
             {
                 // Universal gate: game says skill can't be used (cooldown/mana/souls)
                 if (entry.Skill != null && !entry.Skill.CanBeUsed) continue;
+
+                // Suppress cursor-moving skills during loot pickup to avoid cursor interference
+                if (SuppressTargetedSkills && (entry.Role == SkillRole.Enemy || entry.Role == SkillRole.Corpse))
+                    continue;
 
                 // Targeting prerequisite: Enemy needs a target, Corpse needs a corpse
                 if (entry.Role == SkillRole.Enemy && (BestTarget == null || !InCombat)) continue;
@@ -713,8 +775,11 @@ namespace AutoExile.Systems
         // Positioning — uses cursor + move key, never clicks
         // ═══════════════════════════════════════════════════
 
-        private void TickPositioning(GameController gc, BotSettings.BuildSettings settings)
+        private void TickPositioning(BotContext ctx)
         {
+            var gc = ctx.Game;
+            var settings = ctx.Settings.Build;
+
             if (BestTarget == null) return;
 
             // Aggressive mode chases ANY monster (retaliatory builds need to be on top of mobs).
@@ -727,33 +792,28 @@ namespace AutoExile.Systems
             if (!worthChasing) return;
 
             var playerGrid = gc.Player.GridPosNum;
-            // Use NearbyPackCenter for positioning (only monsters within chase radius)
-            // to avoid being pulled toward distant cached entities
-            float dist = Vector2.Distance(playerGrid, NearbyPackCenter);
+            float dist = Vector2.Distance(playerGrid, DenseClusterCenter);
 
             Vector2? desiredGridPos = null;
 
             switch (Profile.Positioning)
             {
                 case CombatPositioning.Aggressive:
-                    // Walk directly into the pack — retaliatory builds need to be on top of mobs.
-                    // Use a tight threshold (3 grid ≈ 33 world) so we stay glued to the pack center.
+                    // Walk directly into the densest pack.
                     if (dist > 3f)
-                        desiredGridPos = NearbyPackCenter;
+                        desiredGridPos = DenseClusterCenter;
                     break;
 
                 case CombatPositioning.Orbit:
                     float orbitDist = settings.OrbitRange.Value;
                     if (dist < orbitDist * 0.6f)
                     {
-                        // Too close — move away
-                        var awayDir = SafeNormalize(playerGrid - NearbyPackCenter);
+                        var awayDir = SafeNormalize(playerGrid - DenseClusterCenter);
                         desiredGridPos = playerGrid + awayDir * orbitDist * 0.4f;
                     }
                     else if (dist > orbitDist * 1.4f)
                     {
-                        // Too far — move toward pack
-                        desiredGridPos = NearbyPackCenter;
+                        desiredGridPos = DenseClusterCenter;
                     }
                     break;
 
@@ -761,8 +821,7 @@ namespace AutoExile.Systems
                     float safeRange = settings.RangedRange.Value;
                     if (dist < safeRange * 0.5f)
                     {
-                        // Too close — retreat
-                        var awayDir = SafeNormalize(playerGrid - NearbyPackCenter);
+                        var awayDir = SafeNormalize(playerGrid - DenseClusterCenter);
                         desiredGridPos = playerGrid + awayDir * safeRange * 0.5f;
                     }
                     break;
@@ -771,12 +830,15 @@ namespace AutoExile.Systems
                     break;
             }
 
-            if (desiredGridPos.HasValue)
-            {
-                WantsToMove = true;
-                MoveTarget = ToWorld(desiredGridPos.Value);
-                ExecuteMove(gc, MoveTarget);
-            }
+            if (!desiredGridPos.HasValue) return;
+
+            // Validate the desired position: must be walkable and have targeting LOS to monsters
+            var validPos = ctx.Navigation.FindWalkableWithLOS(gc, desiredGridPos.Value, DenseClusterCenter);
+            if (!validPos.HasValue) return;
+
+            WantsToMove = true;
+            MoveTarget = ToWorld(validPos.Value);
+            ExecuteMove(gc, MoveTarget);
         }
 
         /// <summary>

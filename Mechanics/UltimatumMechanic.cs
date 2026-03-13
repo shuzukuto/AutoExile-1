@@ -524,7 +524,7 @@ namespace AutoExile.Mechanics
         {
             var settings = ctx.Settings.Mechanics.Ultimatum;
 
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             // Check if wave ended (UltimatumPanel appeared for between-wave choices)
             var panel = gc.IngameState.IngameUi.UltimatumPanel;

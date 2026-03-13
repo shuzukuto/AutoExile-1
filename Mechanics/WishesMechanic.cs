@@ -169,7 +169,7 @@ namespace AutoExile.Mechanics
         private MechanicResult TickNavigateToEncounter(BotContext ctx)
         {
             var gc = ctx.Game;
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             ScanFaridunEntities(ctx);
             if (_npc != null && _npc.IsTargetable)
@@ -196,7 +196,7 @@ namespace AutoExile.Mechanics
         private MechanicResult TickWaitForCombatClear(BotContext ctx)
         {
             var gc = ctx.Game;
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             ScanFaridunEntities(ctx);
             if (_npc != null && _npc.IsTargetable)
@@ -220,7 +220,7 @@ namespace AutoExile.Mechanics
         private MechanicResult TickNavigateToNPC(BotContext ctx)
         {
             var gc = ctx.Game;
-            ctx.Combat.Tick(gc, ctx.Settings.Build);
+            ctx.Combat.Tick(ctx);
 
             if (ctx.Navigation.IsPaused)
                 ctx.Navigation.Resume(gc);

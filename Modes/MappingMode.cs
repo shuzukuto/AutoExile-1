@@ -147,8 +147,13 @@ namespace AutoExile.Modes
             // ── Combat (always runs — fires skills while exploring) ──
             // When enough monsters are nearby, pause navigation so combat positioning
             // controls movement (orbit, kite, etc). Resume when monsters are dead.
+            // Suppress cursor-moving combat during loot pickup to avoid click interference.
             if (!_mechanicActive)
-                ctx.Combat.Tick(gc, ctx.Settings.Build);
+            {
+                ctx.Combat.SuppressPositioning = ctx.Interaction.IsBusy;
+                ctx.Combat.SuppressTargetedSkills = ctx.Interaction.IsBusy;
+                ctx.Combat.Tick(ctx);
+            }
 
             // Pause/resume navigation based on combat state
             if (!_mechanicActive && ctx.Combat.InCombat && ctx.Combat.WantsToMove)

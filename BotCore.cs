@@ -801,7 +801,7 @@ namespace AutoExile
                 NearbyMonsterCount = _combat.NearbyMonsterCount,
                 NearbyChaseCount = _combat.NearbyChaseCount,
                 PackCenter = _combat.PackCenter,
-                NearbyPackCenter = _combat.NearbyPackCenter,
+                DenseClusterCenter = _combat.DenseClusterCenter,
                 LastAction = _combat.LastAction,
                 LastSkillAction = _combat.LastSkillAction,
                 BestTargetId = _combat.BestTarget?.Id,
@@ -824,8 +824,7 @@ namespace AutoExile
                 snapshot.Mode.Extra["monolithPos"] = sim.State.MonolithPosition.HasValue
                     ? new[] { sim.State.MonolithPosition.Value.X, sim.State.MonolithPosition.Value.Y }
                     : (object)Array.Empty<float>();
-                snapshot.Mode.Extra["spawnZones"] = sim.State.SpawnZones
-                    .Select(z => new[] { z.X, z.Y }).ToArray();
+                snapshot.Mode.Extra["highestWave"] = sim.State.HighestWaveThisRun;
             }
             else if (_mode is MappingMode map)
             {
