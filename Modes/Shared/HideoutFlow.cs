@@ -173,12 +173,32 @@ namespace AutoExile.Modes.Shared
             if ((DateTime.Now - _phaseStartTime).TotalSeconds > PortalTimeoutSeconds)
             {
                 Status = "No portal found";
+                ctx.Interaction.Cancel(gc);
                 _phase = HideoutPhase.Idle;
                 return HideoutSignal.PortalTimeout;
             }
 
-            if (!ModeHelpers.CanAct(_lastActionTime, ActionCooldownMs))
+            // Close any open panels (stash/inventory) before clicking portal
+            if (gc.IngameState.IngameUi.StashElement?.IsVisible == true ||
+                gc.IngameState.IngameUi.InventoryPanel?.IsVisible == true)
+            {
+                if (ModeHelpers.CanAct(_lastActionTime, ActionCooldownMs))
+                {
+                    BotInput.PressKey(System.Windows.Forms.Keys.Escape);
+                    _lastActionTime = DateTime.Now;
+                    Status = "Closing panels before portal";
+                }
                 return HideoutSignal.InProgress;
+            }
+
+            // Use InteractionSystem for portal clicking — handles navigation,
+            // screen bounds, click verification, and retries automatically.
+            // InteractionSystem is already ticked by the mode before this runs.
+            if (ctx.Interaction.IsBusy)
+            {
+                Status = $"Entering portal: {ctx.Interaction.Status}";
+                return HideoutSignal.InProgress;
+            }
 
             var portal = ModeHelpers.FindNearestPortal(gc);
             if (portal == null)
@@ -187,20 +207,8 @@ namespace AutoExile.Modes.Shared
                 return HideoutSignal.InProgress;
             }
 
-            var playerGridPos = new Vector2(gc.Player.GridPosNum.X, gc.Player.GridPosNum.Y);
-            var portalGridPos = new Vector2(portal.GridPosNum.X, portal.GridPosNum.Y);
-            var dist = Vector2.Distance(playerGridPos, portalGridPos);
-
-            if (dist > 8f)
-            {
-                if (!ctx.Navigation.IsNavigating)
-                    ctx.Navigation.NavigateTo(gc, portalGridPos * Systems.Pathfinding.GridToWorld);
-                Status = $"Walking to portal (dist: {dist:F0})";
-                return HideoutSignal.InProgress;
-            }
-
-            ModeHelpers.ClickEntity(gc, portal, ref _lastActionTime);
-            Status = "Clicking portal to re-enter map";
+            ctx.Interaction.InteractWithEntity(portal, ctx.Navigation, requireProximity: true);
+            Status = "Interacting with portal";
             return HideoutSignal.InProgress;
         }
 

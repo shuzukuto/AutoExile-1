@@ -272,6 +272,8 @@ namespace AutoExile.Systems
                 }
 
                 // Score: rarity weight - distance penalty
+                // Priority targets (totems granting invulnerability) get massive weight
+                // so they are always targeted first — monsters near them are unkillable otherwise
                 float rarityWeight = entity.Rarity switch
                 {
                     MonsterRarity.Magic => 2f,
@@ -279,6 +281,9 @@ namespace AutoExile.Systems
                     MonsterRarity.Unique => 25f,
                     _ => 1f
                 };
+                if (IsPriorityTarget(entity))
+                    rarityWeight = 100f;
+
                 float score = rarityWeight - dist * 0.1f;
 
                 if (score > bestScore)
@@ -295,8 +300,12 @@ namespace AutoExile.Systems
             PackCenter = count > 0 ? packSum / count : playerGrid;
             NearestCorpse = nearestCorpse;
 
-            // Find densest cluster center — the monster position with the most neighbors
-            DenseClusterCenter = FindDensestPosition(_nearbyMonsterPositions, playerGrid);
+            // If best target is a priority target (e.g. cannot-die totem), override positioning
+            // to walk on top of it — ensures minions/summons engage it even without cursor-targeted skills
+            if (bestTarget != null && IsPriorityTarget(bestTarget))
+                DenseClusterCenter = bestTarget.GridPosNum;
+            else
+                DenseClusterCenter = FindDensestPosition(_nearbyMonsterPositions, playerGrid);
         }
 
         /// <summary>
@@ -875,6 +884,22 @@ namespace AutoExile.Systems
         // ═══════════════════════════════════════════════════
         // Helpers
         // ═══════════════════════════════════════════════════
+
+        /// <summary>
+        /// Entities that must be killed before nearby monsters can be damaged.
+        /// These get massive targeting priority regardless of rarity or distance.
+        /// </summary>
+        private static bool IsPriorityTarget(Entity entity)
+        {
+            var path = entity.Metadata;
+            if (path == null) return false;
+
+            // "Allies Cannot Die" totems — grants invulnerability to all nearby monsters
+            if (path.Contains("CannotDie", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
+        }
 
         private static Vector2 ToWorld(Vector2 gridPos)
         {
