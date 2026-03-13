@@ -947,16 +947,15 @@ namespace AutoExile.Modes
                 return;
             }
 
-            // Priority 2: Open nearest visible chest
+            // Priority 2: Open nearest visible chest (don't require cache membership —
+            // if it's visible, unopened, and a chest entity, open it)
             Entity? nearestChest = null;
             float nearestDist = float.MaxValue;
 
             foreach (var entity in gc.EntityListWrapper.OnlyValidEntities)
             {
                 if (entity.Type != EntityType.Chest || entity.IsOpened) continue;
-                var chestPos = entity.GridPosNum;
-                if (!_blight.ChestPositions.Contains(chestPos)) continue;
-                var dist = Vector2.Distance(playerPos, chestPos);
+                var dist = Vector2.Distance(playerPos, entity.GridPosNum);
                 if (dist < nearestDist)
                 {
                     nearestDist = dist;

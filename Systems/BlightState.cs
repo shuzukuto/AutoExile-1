@@ -301,8 +301,12 @@ namespace AutoExile.Systems
             if (_chestEntityPositions.TryGetValue(id, out var chestPos))
             {
                 if (Vector2.Distance(playerPos, chestPos) < RenderRange)
+                {
+                    // Within network bubble = confirmed gone (opened/destroyed)
                     ChestPositions.Remove(chestPos);
-                _chestEntityPositions.Remove(id);
+                    _chestEntityPositions.Remove(id);
+                }
+                // Beyond range = went off-screen, keep both caches so we can navigate back
                 return;
             }
         }
