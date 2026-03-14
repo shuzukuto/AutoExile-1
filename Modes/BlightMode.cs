@@ -40,15 +40,14 @@ namespace AutoExile.Modes
         private Vector2? _currentChestTarget;
 
         // Sweep state
-        private SweepMode _sweepMode = SweepMode.Hunt;
-        private bool _returningToPump;
-        private long _huntTargetId;
-        private Vector2 _huntTargetPos;
-        private HashSet<int> _patrolledLanes = new();
-        private int _currentPatrolLane = -1;
-        private int _patrolWaypointIndex;
-        private List<Vector2> _patrolWaypoints = new();
-        private DateTime _patrolLaneStartTime;
+        private bool _sweepWasSearching;
+        private DateTime _sweepLastOutsidePumpAt = DateTime.MinValue;
+        private DateTime _sweepLastMonsterSeenAt = DateTime.MinValue;
+        private bool _sweepReturningToPump;
+        // Combat stuck detection (same pattern as SimulacrumMode)
+        private DateTime _sweepCombatEngageTime = DateTime.MinValue;
+        private int _sweepCombatEngageCount;
+        private const float SweepCombatStuckSeconds = 15f;
 
         // Action cooldown for major actions (pump click, fast-forward)
         private const float MajorActionCooldownMs = 500f;
@@ -123,10 +122,10 @@ namespace AutoExile.Modes
 
                 // Suppress combat repositioning during phases where BlightMode drives navigation.
                 // Combat still scans threats and fires skills — just won't move the player.
-                // Only allow combat positioning in WaitForCompletion when actively fighting (no tower action).
-                bool allowCombatMovement = _phase == BlightPhase.WaitForCompletion
-                    && _towerAction == null
-                    && ctx.Combat.NearbyChaseCount > 0;
+                // Allow combat positioning in WaitForCompletion (no tower action) and Sweep when fighting.
+                bool allowCombatMovement = ((_phase == BlightPhase.WaitForCompletion && _towerAction == null)
+                    || (_phase == BlightPhase.Sweep && !_sweepReturningToPump))
+                    && ctx.Combat.NearbyMonsterCount > 0;
                 ctx.Combat.SuppressPositioning = !allowCombatMovement;
 
                 ctx.Combat.Tick(ctx);
@@ -244,8 +243,10 @@ namespace AutoExile.Modes
             {
                 // Entered a map — start looking for pump
                 var deathCount = _blight.DeathCount; // preserve across reset
+                var portalPos = _blight.PortalPosition; // preserve — portal doesn't move
                 _blight.Reset();
                 _blight.DeathCount = deathCount;
+                _blight.PortalPosition = portalPos;
                 _blight.InitializeFromCurrentEntities(gc);
                 _phase = BlightPhase.FindPump;
                 _phaseStartTime = DateTime.Now;
@@ -521,11 +522,11 @@ namespace AutoExile.Modes
             // If nearby monsters exist, cancel tower actions and let combat positioning
             // take over (Combat.Tick runs before this, but tower navigation overrides
             // combat movement each tick). Only build towers when no immediate threats.
-            if (ctx.Combat.NearbyChaseCount > 0)
+            if (ctx.Combat.NearbyMonsterCount > 0)
             {
                 if (_towerAction != null)
                     CancelTowerAction(ctx);
-                StatusText = $"Fighting — {ctx.Combat.NearbyChaseCount} nearby, {_blight.AliveMonsterCount} alive";
+                StatusText = $"Fighting — {ctx.Combat.NearbyMonsterCount} nearby, {_blight.AliveMonsterCount} alive";
             }
             else
             {
@@ -608,8 +609,8 @@ namespace AutoExile.Modes
             var pumpPos = _blight.PumpPosition.Value;
             var distToPump = Vector2.Distance(playerPos, pumpPos);
 
-            // Safety radius = half of tower approach distance (stay close to pump)
-            float safetyRadius = _settings.TowerApproachDistance.Value * 0.75f;
+            // Safety radius — stay reasonably close to pump between tower actions
+            float safetyRadius = 30f;
 
             if (distToPump > safetyRadius && !ctx.Navigation.IsNavigating)
             {
@@ -642,20 +643,19 @@ namespace AutoExile.Modes
         }
 
         // =================================================================
-        // Sweep — with monster avoidance
+        // Sweep — hunt cached monsters, explore for stragglers, return to pump periodically
         // =================================================================
 
         private void EnterSweepPhase()
         {
             _phase = BlightPhase.Sweep;
             _phaseStartTime = DateTime.Now;
-            _sweepMode = SweepMode.Hunt;
-            _returningToPump = false;
-            _huntTargetId = 0;
-            _patrolledLanes.Clear();
-            _currentPatrolLane = -1;
-            _patrolWaypoints.Clear();
-            _patrolWaypointIndex = 0;
+            _sweepWasSearching = false;
+            _sweepLastOutsidePumpAt = DateTime.MinValue;
+            _sweepLastMonsterSeenAt = DateTime.Now;
+            _sweepReturningToPump = false;
+            _sweepCombatEngageTime = DateTime.MinValue;
+            _sweepCombatEngageCount = 0;
         }
 
         private void TickSweep(BotContext ctx)
@@ -668,232 +668,214 @@ namespace AutoExile.Modes
                 return;
             }
 
-            // No timeout — sweep continues until success=1 or fail=1.
-            // Patrol will cycle through lanes repeatedly to find remaining monsters.
-
             var gc = ctx.Game;
             var playerPos = gc.Player.GridPosNum;
             var pumpPos = _blight.PumpPosition ?? playerPos;
+            var distToPump = Vector2.Distance(playerPos, pumpPos);
+            var now = DateTime.Now;
 
-            // Safety: if monsters near pump, rush back
-            if (_blight.PumpUnderAttack)
+            var pumpRadius = _settings.SweepPumpRadius.Value;
+            var returnSeconds = _settings.SweepPumpReturnSeconds.Value;
+
+            // --- Track pump proximity timer ---
+            // Reset timer when inside pump radius, start/continue when outside
+            if (distToPump <= pumpRadius)
             {
-                ctx.Navigation.Stop(gc);
-                if (Vector2.Distance(playerPos, pumpPos) > 9f)
+                _sweepLastOutsidePumpAt = DateTime.MinValue;
+                _sweepReturningToPump = false;
+            }
+            else if (_sweepLastOutsidePumpAt == DateTime.MinValue)
+            {
+                _sweepLastOutsidePumpAt = now;
+            }
+
+            // --- Forced return to pump ---
+            // Been outside pump radius too long — return to refresh state machine and check threats
+            bool awayTooLong = _sweepLastOutsidePumpAt != DateTime.MinValue
+                && (now - _sweepLastOutsidePumpAt).TotalSeconds > returnSeconds;
+
+            if (_sweepReturningToPump || awayTooLong)
+            {
+                _sweepReturningToPump = true;
+                if (distToPump < 18f)
+                {
+                    // Arrived at pump — reset and resume sweep
+                    _sweepReturningToPump = false;
+                    _sweepLastOutsidePumpAt = DateTime.MinValue;
+                    ctx.Navigation.Stop(gc);
+                    // Reset exploration so we re-sweep from pump outward
+                    if (ctx.Exploration.IsInitialized)
+                        ctx.Exploration.ResetSeen();
+                    _sweepWasSearching = false;
+                    StatusText = "Returned to pump — resuming sweep";
+                    return;
+                }
+
+                if (!ctx.Navigation.IsNavigating)
                     ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(pumpPos));
-                _huntTargetId = 0;
-                _currentPatrolLane = -1;
-                _returningToPump = false;
-                StatusText = "PUMP DANGER — rushing back!";
+                StatusText = $"Returning to pump (dist: {distToPump:F0})";
                 return;
             }
 
-            var now = DateTime.Now;
-            bool hasKnownMonsters = false;
-            foreach (var cm in _blight.CachedMonsters.Values)
+            // --- No-monster timeout ---
+            // If no monsters found for SweepTimeoutSeconds, give up
+            if ((now - _sweepLastMonsterSeenAt).TotalSeconds > _settings.SweepTimeoutSeconds.Value)
             {
-                if (cm.AssumedAlive && (cm.IsVisible || (now - cm.LastSeen).TotalSeconds <= 3.0))
-                { hasKnownMonsters = true; break; }
+                ctx.Navigation.Stop(gc);
+                EnterOpenChestsPhase();
+                StatusText = $"Sweep timeout — no monsters for {_settings.SweepTimeoutSeconds.Value:F0}s";
+                return;
             }
 
-            if (hasKnownMonsters)
+            // --- Priority 1: Fight nearby monsters ---
+            if (ctx.Combat.NearbyMonsterCount > 0)
             {
-                _sweepMode = SweepMode.Hunt;
-                _returningToPump = false;
-                TickSweepHunt(ctx, gc, playerPos, pumpPos);
-            }
-            else
-            {
-                if (_sweepMode == SweepMode.Hunt)
+                _sweepLastMonsterSeenAt = now;
+
+                // Combat stuck detection: if monster count isn't decreasing, move on
+                if (_sweepCombatEngageTime == DateTime.MinValue || ctx.Combat.NearbyMonsterCount < _sweepCombatEngageCount)
                 {
-                    _sweepMode = SweepMode.Patrol;
-                    _huntTargetId = 0;
-                    _returningToPump = true;
+                    _sweepCombatEngageTime = now;
+                    _sweepCombatEngageCount = ctx.Combat.NearbyMonsterCount;
                 }
-                TickSweepPatrol(ctx, gc, playerPos, pumpPos);
+
+                var combatElapsed = (now - _sweepCombatEngageTime).TotalSeconds;
+                if (combatElapsed > SweepCombatStuckSeconds)
+                {
+                    // Stuck fighting same monsters too long — explore elsewhere
+                    _sweepCombatEngageTime = DateTime.MinValue;
+                    _sweepCombatEngageCount = 0;
+                    if (!_sweepWasSearching)
+                    {
+                        _sweepWasSearching = true;
+                        if (ctx.Exploration.IsInitialized)
+                            ctx.Exploration.ResetSeen();
+                    }
+                    StatusText = $"Combat stuck ({combatElapsed:F0}s) — moving on ({ctx.Combat.NearbyMonsterCount} unreachable)";
+                    TickSweepExplore(ctx, playerPos, pumpPos);
+                }
+                else
+                {
+                    _sweepWasSearching = false;
+                    // CombatSystem handles fighting + positioning (SuppressPositioning = false above)
+                    StatusText = $"Sweep: fighting ({ctx.Combat.NearbyMonsterCount} nearby, {ctx.Combat.CachedMonsterCount} total)";
+                }
+                return;
             }
+
+            // --- Priority 2: Chase cached distant monsters (closest to pump first) ---
+            if (ctx.Combat.CachedMonsterCount > 0)
+            {
+                _sweepLastMonsterSeenAt = now;
+
+                // Transition from fighting → searching: reset exploration
+                if (!_sweepWasSearching)
+                {
+                    _sweepWasSearching = true;
+                    if (ctx.Exploration.IsInitialized)
+                        ctx.Exploration.ResetSeen();
+                }
+                _sweepCombatEngageTime = DateTime.MinValue;
+                _sweepCombatEngageCount = 0;
+
+                // Find the monster closest to pump (biggest threat)
+                var nearestToPumpPos = FindMonsterClosestToPump(gc, pumpPos);
+                if (nearestToPumpPos.HasValue)
+                {
+                    var monsterDist = Vector2.Distance(playerPos, nearestToPumpPos.Value);
+                    if (monsterDist > 20f && !ctx.Navigation.IsNavigating)
+                        ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(nearestToPumpPos.Value));
+                    StatusText = $"Sweep: chasing monster near pump (dist: {monsterDist:F0}, {ctx.Combat.CachedMonsterCount} alive)";
+                    return;
+                }
+            }
+
+            // --- Priority 3: Explore for stragglers ---
+            if (!_sweepWasSearching)
+            {
+                _sweepWasSearching = true;
+                if (ctx.Exploration.IsInitialized)
+                    ctx.Exploration.ResetSeen();
+            }
+            _sweepCombatEngageTime = DateTime.MinValue;
+            _sweepCombatEngageCount = 0;
+
+            TickSweepExplore(ctx, playerPos, pumpPos);
         }
 
         /// <summary>
-        /// Hunt mode with monster avoidance: don't path directly into large groups.
-        /// Instead, approach gradually — get within a moderate distance and let minions clear.
-        /// Only close the gap when few monsters remain.
+        /// Explore the map to find remaining monsters. Falls back to orbiting the pump
+        /// when exploration is exhausted.
         /// </summary>
-        private void TickSweepHunt(BotContext ctx, GameController gc, Vector2 playerPos, Vector2 pumpPos)
+        private void TickSweepExplore(BotContext ctx, Vector2 playerPos, Vector2 pumpPos)
         {
-            var now = DateTime.Now;
-            const double STALE_SECONDS = 3.0;
+            var gc = ctx.Game;
 
-            if (_huntTargetId != 0)
+            // Let current navigation finish before picking a new target
+            if (ctx.Navigation.IsNavigating)
             {
-                if (!_blight.CachedMonsters.TryGetValue(_huntTargetId, out var target) || !target.AssumedAlive
-                    || (!target.IsVisible && (now - target.LastSeen).TotalSeconds > STALE_SECONDS))
-                    _huntTargetId = 0;
-            }
-
-            if (_huntTargetId == 0)
-            {
-                float bestPathDist = float.MaxValue;
-                long bestId = 0;
-                Vector2 bestPos = default;
-
-                foreach (var cm in _blight.CachedMonsters.Values)
-                {
-                    if (!cm.AssumedAlive) continue;
-                    if (!cm.IsVisible && (now - cm.LastSeen).TotalSeconds > STALE_SECONDS) continue;
-
-                    float pathDist = _blight.LaneTracker.EstimatePathDistanceToPump(cm.Position, pumpPos);
-                    if (pathDist < bestPathDist)
-                    {
-                        bestPathDist = pathDist;
-                        bestId = cm.EntityId;
-                        bestPos = cm.Position;
-                    }
-                }
-
-                if (bestId == 0)
-                {
-                    StatusText = "Hunt: no monsters found";
-                    return;
-                }
-
-                _huntTargetId = bestId;
-                _huntTargetPos = bestPos;
-            }
-
-            var distToTarget = Vector2.Distance(playerPos, _huntTargetPos);
-
-            // Count visible monsters near our target to gauge threat density
-            int nearbyMonsterCount = 0;
-            foreach (var cm in _blight.CachedMonsters.Values)
-            {
-                if (cm.AssumedAlive && cm.IsVisible &&
-                    Vector2.Distance(cm.Position, _huntTargetPos) < 30f)
-                    nearbyMonsterCount++;
-            }
-
-            // Avoidance: if large group (5+), keep distance and let minions engage
-            // Only approach to within ~25 grid units when group is large
-            float approachDistance = nearbyMonsterCount >= 5 ? 25f : 9f;
-
-            if (distToTarget < approachDistance)
-            {
-                if (nearbyMonsterCount >= 5)
-                {
-                    // Large group — hold position, let minions do the work
-                    ctx.Navigation.Stop(gc);
-                    StatusText = $"Hunt: holding — {nearbyMonsterCount} enemies nearby ({_blight.AliveMonsterCount} alive)";
-                }
-                else
-                {
-                    StatusText = $"Hunt: at target — confirming kill ({_blight.AliveMonsterCount} alive)";
-                    _huntTargetId = 0;
-                }
+                StatusText = $"Sweep: searching for monsters ({ctx.Combat.CachedMonsterCount} alive)";
                 return;
             }
 
-            // Navigate — aim for approach distance, not directly on top
-            if (!ctx.Navigation.IsNavigating)
+            // Try exploration target
+            if (ctx.Exploration.IsInitialized)
             {
-                Vector2 navTarget;
-                if (nearbyMonsterCount >= 5 && distToTarget > approachDistance)
+                var target = ctx.Exploration.GetNextExplorationTarget(playerPos);
+                if (target.HasValue)
                 {
-                    // Approach cautiously: aim for a point approachDistance away from target
-                    var dir = Vector2.Normalize(_huntTargetPos - playerPos);
-                    navTarget = _huntTargetPos - dir * approachDistance;
+                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(target.Value));
+                    StatusText = $"Sweep: exploring for monsters ({ctx.Combat.CachedMonsterCount} alive)";
+                    return;
                 }
-                else
-                {
-                    navTarget = _huntTargetPos;
-                }
-                ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(navTarget));
             }
 
-            StatusText = $"Hunt: approaching (dist: {distToTarget:F0}, {nearbyMonsterCount} nearby, {_blight.AliveMonsterCount} alive)";
-        }
-
-        private void TickSweepPatrol(BotContext ctx, GameController gc, Vector2 playerPos, Vector2 pumpPos)
-        {
-            var leash = _settings.SweepPumpLeashRadius.Value;
-
-            if (_returningToPump)
+            // Exploration exhausted — orbit the pump to find stragglers
+            if (_blight.PumpPosition.HasValue)
             {
                 var distToPump = Vector2.Distance(playerPos, pumpPos);
-                if (distToPump < 18f)
+                if (distToPump > 60f)
                 {
-                    _returningToPump = false;
-                    ctx.Navigation.Stop(gc);
+                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(pumpPos));
+                    StatusText = $"Sweep: returning to pump (exploration exhausted, dist: {distToPump:F0})";
+                    return;
                 }
-                else
+                if (distToPump < 30f)
                 {
-                    if (!ctx.Navigation.IsNavigating)
-                        ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(pumpPos));
-                    StatusText = $"Returning to pump (dist: {distToPump:F0})";
+                    var angle = (float)(DateTime.Now.Ticks % 6283) / 1000f;
+                    var orbitTarget = pumpPos + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 50f;
+                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(orbitTarget));
+                    StatusText = $"Sweep: orbiting pump ({ctx.Combat.CachedMonsterCount} alive)";
                     return;
                 }
             }
 
-            if (_currentPatrolLane < 0)
+            StatusText = $"Sweep: searching (no targets, {ctx.Combat.CachedMonsterCount} alive)";
+        }
+
+        /// <summary>
+        /// Find the alive hostile monster closest to the pump (biggest threat).
+        /// Uses OnlyValidEntities (entity list), not blight-specific cache.
+        /// </summary>
+        private static Vector2? FindMonsterClosestToPump(GameController gc, Vector2 pumpPos)
+        {
+            float bestDist = float.MaxValue;
+            Vector2? bestPos = null;
+
+            foreach (var entity in gc.EntityListWrapper.OnlyValidEntities)
             {
-                var laneOrder = _blight.LaneTracker.GetLanesOrderedByDanger();
-                int nextLane = -1;
-                foreach (var li in laneOrder)
-                {
-                    if (!_patrolledLanes.Contains(li))
-                    {
-                        nextLane = li;
-                        break;
-                    }
-                }
+                if (entity.Type != EntityType.Monster || !entity.IsHostile) continue;
+                if (!entity.IsAlive || !entity.IsTargetable) continue;
 
-                if (nextLane < 0)
+                var dist = Vector2.Distance(entity.GridPosNum, pumpPos);
+                if (dist < bestDist)
                 {
-                    // All lanes patrolled but encounter not done — re-patrol to find remaining monsters
-                    _patrolledLanes.Clear();
-                    _returningToPump = true;
-                    ctx.Navigation.Stop(gc);
-                    StatusText = $"All lanes patrolled — restarting ({_blight.AliveMonsterCount} alive)";
-                    return;
+                    bestDist = dist;
+                    bestPos = entity.GridPosNum;
                 }
-
-                _currentPatrolLane = nextLane;
-                _patrolWaypoints = _blight.LaneTracker.GetLaneWaypointsFromPump(nextLane, pumpPos);
-                _patrolWaypointIndex = 0;
-                _patrolLaneStartTime = DateTime.Now;
             }
 
-            if ((DateTime.Now - _patrolLaneStartTime).TotalSeconds > _settings.SweepPatrolLaneTimeoutSeconds.Value)
-            {
-                _patrolledLanes.Add(_currentPatrolLane);
-                _currentPatrolLane = -1;
-                _returningToPump = true;
-                ctx.Navigation.Stop(gc);
-                StatusText = "Patrol lane timeout — returning";
-                return;
-            }
-
-            if (_patrolWaypointIndex < _patrolWaypoints.Count)
-            {
-                var wp = _patrolWaypoints[_patrolWaypointIndex];
-                var distToWp = Vector2.Distance(playerPos, wp);
-                if (distToWp < 9f)
-                {
-                    _patrolWaypointIndex++;
-                }
-                else if (!ctx.Navigation.IsNavigating)
-                {
-                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(wp));
-                }
-
-                StatusText = $"Patrol L{_currentPatrolLane} wp {_patrolWaypointIndex}/{_patrolWaypoints.Count}";
-            }
-            else
-            {
-                _patrolledLanes.Add(_currentPatrolLane);
-                _currentPatrolLane = -1;
-                _returningToPump = true;
-                ctx.Navigation.Stop(gc);
-            }
+            return bestPos;
         }
 
         // =================================================================
@@ -1047,14 +1029,19 @@ namespace AutoExile.Modes
             if (gc.Area.CurrentArea.IsHideout)
                 return;
 
-            if ((DateTime.Now - _phaseStartTime).TotalSeconds > 30)
+            if ((DateTime.Now - _phaseStartTime).TotalSeconds > 60)
             {
                 _phase = BlightPhase.Done;
                 StatusText = "Exit timeout — giving up";
                 return;
             }
 
-            if (!ModeHelpers.CanAct(_lastActionTime, MajorActionCooldownMs)) return;
+            // Let InteractionSystem handle clicking if it's busy (retries, UI blocking, etc.)
+            if (ctx.Interaction.IsBusy)
+            {
+                StatusText = $"Clicking portal to exit";
+                return;
+            }
 
             // Try to find live portal entity first
             Entity? portal = ModeHelpers.FindNearestPortal(gc);
@@ -1073,14 +1060,14 @@ namespace AutoExile.Modes
                     return;
                 }
 
-                // Click portal
+                // Use InteractionSystem for click verification and UI blocking
                 ctx.Navigation.Stop(gc);
-                ModeHelpers.ClickEntity(gc, portal, ref _lastActionTime);
+                ctx.Interaction.InteractWithEntity(portal, ctx.Navigation);
                 StatusText = "Clicking portal to exit";
                 return;
             }
 
-            // No live portal — use cached position
+            // No live portal — navigate to cached position to bring it into entity range
             if (_blight.PortalPosition.HasValue)
             {
                 var cachedPos = _blight.PortalPosition.Value;
@@ -1250,9 +1237,12 @@ namespace AutoExile.Modes
 
             if (_phase == BlightPhase.Sweep)
             {
-                var sweepInfo = _sweepMode == SweepMode.Hunt
-                    ? $"Sweep: HUNT ({_blight.AliveMonsterCount} alive)"
-                    : $"Sweep: PATROL L{_currentPatrolLane} wp {_patrolWaypointIndex}/{_patrolWaypoints.Count} ({_patrolledLanes.Count}/{_blight.LaneTracker.Lanes.Count} done)";
+                var awayTime = _sweepLastOutsidePumpAt != DateTime.MinValue
+                    ? $", away {(DateTime.Now - _sweepLastOutsidePumpAt).TotalSeconds:F0}s/{_settings.SweepPumpReturnSeconds.Value:F0}s"
+                    : "";
+                var noMonsterTime = (DateTime.Now - _sweepLastMonsterSeenAt).TotalSeconds;
+                var sweepInfo = $"Sweep: {ctx.Combat.NearbyMonsterCount} nearby, {ctx.Combat.CachedMonsterCount} cached{awayTime}"
+                    + (noMonsterTime > 5 ? $", no monsters {noMonsterTime:F0}s" : "");
                 g.DrawText(sweepInfo, new Vector2(hudX, hudY), SharpDX.Color.Orange);
                 hudY += lineH;
             }
@@ -1329,9 +1319,4 @@ namespace AutoExile.Modes
         Done,
     }
 
-    public enum SweepMode
-    {
-        Hunt,
-        Patrol,
-    }
 }

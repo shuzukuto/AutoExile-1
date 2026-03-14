@@ -420,17 +420,16 @@ namespace AutoExile.Modes
             // --- Priority 3: Wave active — fight and explore ---
             if (_state.IsWaveActive)
             {
-                // Use NearbyChaseCount (within 80 grid) not NearbyMonsterCount (all cached entities)
-                // Stale cached entities far beyond network bubble shouldn't prevent patrolling
-                if (ctx.Combat.NearbyChaseCount > 0)
+                // NearbyMonsterCount = within CombatRange — monsters close enough to fight
+                if (ctx.Combat.NearbyMonsterCount > 0)
                 {
                     // Combat stuck detection: if monster count isn't decreasing, we're
                     // probably fighting unreachable/unkillable monsters — move on
-                    if (_combatEngageTime == DateTime.MinValue || ctx.Combat.NearbyChaseCount < _combatEngageCount)
+                    if (_combatEngageTime == DateTime.MinValue || ctx.Combat.NearbyMonsterCount < _combatEngageCount)
                     {
                         // First engagement or making progress — reset timer
                         _combatEngageTime = DateTime.Now;
-                        _combatEngageCount = ctx.Combat.NearbyChaseCount;
+                        _combatEngageCount = ctx.Combat.NearbyMonsterCount;
                     }
 
                     var combatElapsed = (DateTime.Now - _combatEngageTime).TotalSeconds;
@@ -444,7 +443,7 @@ namespace AutoExile.Modes
                             _wasSearching = true;
                             ctx.Exploration.ResetSeen();
                         }
-                        Decision = $"Wave {_state.CurrentWave} — combat stuck ({combatElapsed:F0}s), moving on ({ctx.Combat.NearbyChaseCount} unreachable)";
+                        Decision = $"Wave {_state.CurrentWave} — combat stuck ({combatElapsed:F0}s), moving on ({ctx.Combat.NearbyMonsterCount} unreachable)";
                         TickExploreForMonsters(ctx);
                     }
                     else
@@ -452,8 +451,8 @@ namespace AutoExile.Modes
                         _wasSearching = false;
 
                         // Combat system handles fighting + positioning automatically via Tick above
-                        Decision = $"Wave {_state.CurrentWave} — fighting ({ctx.Combat.NearbyChaseCount} nearby, {ctx.Combat.NearbyMonsterCount} total)";
-                        StatusText = $"Wave {_state.CurrentWave}/15 — fighting {ctx.Combat.NearbyChaseCount} monsters";
+                        Decision = $"Wave {_state.CurrentWave} — fighting ({ctx.Combat.NearbyMonsterCount} nearby, {ctx.Combat.CachedMonsterCount} total)";
+                        StatusText = $"Wave {_state.CurrentWave}/15 — fighting {ctx.Combat.NearbyMonsterCount} monsters";
                     }
                 }
                 else
@@ -468,7 +467,7 @@ namespace AutoExile.Modes
                     _combatEngageTime = DateTime.MinValue;
                     _combatEngageCount = 0;
 
-                    Decision = $"Wave {_state.CurrentWave} — patrolling ({ctx.Combat.NearbyMonsterCount} distant)";
+                    Decision = $"Wave {_state.CurrentWave} — patrolling ({ctx.Combat.CachedMonsterCount} distant)";
                     TickExploreForMonsters(ctx);
                 }
                 return;
@@ -604,14 +603,15 @@ namespace AutoExile.Modes
             var gc = ctx.Game;
             var playerPos = gc.Player.GridPosNum;
 
-            // Tier 1: Cached distant monsters exist — navigate toward them to clear them
-            if (ctx.Combat.NearbyMonsterCount > 0)
+            // Tier 1: Known monsters exist — navigate toward the nearest one
+            if (ctx.Combat.CachedMonsterCount > 0 && ctx.Combat.NearestMonsterPos.HasValue)
             {
                 _wasSearching = true;
-                var packDist = Vector2.Distance(playerPos, ctx.Combat.PackCenter);
-                if (packDist > 20f && !ctx.Navigation.IsNavigating)
-                    ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(ctx.Combat.PackCenter));
-                StatusText = $"Wave {_state.CurrentWave}/15 — chasing distant monsters (dist: {packDist:F0}, {ctx.Combat.NearbyMonsterCount} alive)";
+                var nearestPos = ctx.Combat.NearestMonsterPos.Value;
+                var monsterDist = Vector2.Distance(playerPos, nearestPos);
+                if (monsterDist > 20f && !ctx.Navigation.IsNavigating)
+                    ctx.Navigation.NavigateTo(gc, SimulacrumState.ToWorld(nearestPos));
+                StatusText = $"Wave {_state.CurrentWave}/15 — chasing nearest monster (dist: {monsterDist:F0}, {ctx.Combat.CachedMonsterCount} alive)";
                 return;
             }
 

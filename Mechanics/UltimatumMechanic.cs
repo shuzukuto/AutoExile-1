@@ -678,9 +678,6 @@ namespace AutoExile.Mechanics
                     _acceptedModIds.Add(bestMod.Id);
                     ctx.Log($"[Ultimatum] Accepted mod: {bestMod.Name} (danger={modDanger}, total={_cumulativeDanger})");
 
-                    // Update combat engage radius in case this mod affects area
-                    var newRadius = GetEffectiveOrbitRadius(settings.OrbitRadius.Value);
-                    ctx.Combat.Profile.EngageRadius = newRadius;
                 }
 
                 Status = $"Accepted: {bestMod.Name} (total danger={_cumulativeDanger})";
@@ -943,15 +940,12 @@ namespace AutoExile.Mechanics
             {
                 Enabled = ctx.Combat.Profile.Enabled,
                 Positioning = ctx.Combat.Profile.Positioning,
-                EngageRadius = ctx.Combat.Profile.EngageRadius,
             };
 
-            var effectiveRadius = GetEffectiveOrbitRadius(settings.OrbitRadius.Value);
             ctx.Combat.SetProfile(new CombatProfile
             {
                 Enabled = true,
-                Positioning = CombatPositioning.Orbit,
-                EngageRadius = effectiveRadius,
+                Positioning = CombatPositioning.Ranged,
             });
         }
 

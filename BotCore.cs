@@ -48,6 +48,12 @@ namespace AutoExile
         private readonly Dictionary<string, AreaStateCache> _areaStateCache = new();
         private const int MaxCachedAreas = 3;
 
+        // Debug range circle — shows adjusted range values for 5 seconds
+        private string _debugCircleLabel = "";
+        private int _debugCircleRadius;
+        private DateTime _debugCircleExpiry = DateTime.MinValue;
+        private readonly Dictionary<string, int> _lastRangeValues = new();
+
         // --- Buff scanner ---
         private bool _buffScanActive;
         private int _buffScanSlotIndex = -1; // which skill slot (0-based) we're scanning for
@@ -343,6 +349,8 @@ namespace AutoExile
             if (!Settings.Enable || !GameController.InGame)
                 return;
 
+            UpdateDebugRangeCircle();
+
             // Status overlay
             var running = Settings.Running.Value;
             var color = running ? SharpDX.Color.LimeGreen : SharpDX.Color.Yellow;
@@ -357,6 +365,51 @@ namespace AutoExile
             _ctx.Graphics = Graphics;
             _mode.Render(_ctx);
             _ctx.Graphics = null;
+
+            // Debug range circle overlay
+            if (DateTime.Now < _debugCircleExpiry && _debugCircleRadius > 0 && GameController.Player != null)
+            {
+                var playerPos = GameController.Player.PosNum;
+                var worldRadius = _debugCircleRadius * Systems.Pathfinding.GridToWorld;
+                Graphics.DrawCircleInWorld(
+                    new System.Numerics.Vector3(playerPos.X, playerPos.Y, playerPos.Z),
+                    (float)worldRadius, SharpDX.Color.Yellow, 2f);
+
+                var camera = GameController.IngameState.Camera;
+                var labelScreen = camera.WorldToScreen(playerPos);
+                Graphics.DrawText(_debugCircleLabel,
+                    new System.Numerics.Vector2(labelScreen.X - 40, labelScreen.Y - 60),
+                    SharpDX.Color.Yellow);
+            }
+        }
+
+        private void UpdateDebugRangeCircle()
+        {
+            var b = Settings.Build;
+            var l = Settings.Loot;
+
+            CheckRange("Fight Range", b.FightRange.Value);
+            CheckRange("Combat Range", b.CombatRange.Value);
+            CheckRange("Loot Radius", l.LootRadius.Value);
+
+            // Per-skill MaxTargetRange
+            int i = 1;
+            foreach (var slot in b.AllSkillSlots)
+            {
+                CheckRange($"Skill {i} Range", slot.MaxTargetRange.Value);
+                i++;
+            }
+        }
+
+        private void CheckRange(string label, int currentValue)
+        {
+            if (_lastRangeValues.TryGetValue(label, out var prev) && prev != currentValue)
+            {
+                _debugCircleLabel = $"{label}: {currentValue}";
+                _debugCircleRadius = currentValue;
+                _debugCircleExpiry = DateTime.Now.AddSeconds(5);
+            }
+            _lastRangeValues[label] = currentValue;
         }
 
         public override void DrawSettings()
@@ -615,8 +668,8 @@ namespace AutoExile
                     if (ImGui.Button("Enable Combat (Aggressive)"))
                         _combat.SetProfile(new Systems.CombatProfile { Enabled = true, Positioning = Systems.CombatPositioning.Aggressive });
                     ImGui.SameLine();
-                    if (ImGui.Button("Enable Combat (Orbit)"))
-                        _combat.SetProfile(new Systems.CombatProfile { Enabled = true, Positioning = Systems.CombatPositioning.Orbit });
+                    if (ImGui.Button("Enable Combat (Melee)"))
+                        _combat.SetProfile(new Systems.CombatProfile { Enabled = true, Positioning = Systems.CombatPositioning.Melee });
                     ImGui.SameLine();
                     if (ImGui.Button("Enable Combat (Ranged)"))
                         _combat.SetProfile(new Systems.CombatProfile { Enabled = true, Positioning = Systems.CombatPositioning.Ranged });
@@ -799,9 +852,10 @@ namespace AutoExile
             {
                 InCombat = _combat.InCombat,
                 NearbyMonsterCount = _combat.NearbyMonsterCount,
-                NearbyChaseCount = _combat.NearbyChaseCount,
+                CachedMonsterCount = _combat.CachedMonsterCount,
                 PackCenter = _combat.PackCenter,
                 DenseClusterCenter = _combat.DenseClusterCenter,
+                NearestMonsterPos = _combat.NearestMonsterPos,
                 LastAction = _combat.LastAction,
                 LastSkillAction = _combat.LastSkillAction,
                 BestTargetId = _combat.BestTarget?.Id,
@@ -848,6 +902,9 @@ namespace AutoExile
                 snapshot.Mode.Extra["pumpUnderAttack"] = bs.PumpUnderAttack;
                 snapshot.Mode.Extra["aliveMonsterCount"] = bs.AliveMonsterCount;
                 snapshot.Mode.Extra["chestCount"] = bs.ChestPositions.Count;
+                snapshot.Mode.Extra["portalPos"] = bs.PortalPosition.HasValue
+                    ? new[] { bs.PortalPosition.Value.X, bs.PortalPosition.Value.Y }
+                    : (object)Array.Empty<float>();
                 snapshot.Mode.Extra["deathCount"] = bs.DeathCount;
             }
             else if (_mode is FollowerMode follower)

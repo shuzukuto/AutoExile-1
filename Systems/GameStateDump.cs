@@ -57,9 +57,10 @@ namespace AutoExile.Systems
     {
         public bool InCombat { get; set; }
         public int NearbyMonsterCount { get; set; }
-        public int NearbyChaseCount { get; set; }
+        public int CachedMonsterCount { get; set; }
         public Vector2 PackCenter { get; set; }
         public Vector2 DenseClusterCenter { get; set; }
+        public Vector2? NearestMonsterPos { get; set; }
         public string LastAction { get; set; } = "";
         public string LastSkillAction { get; set; } = "";
         public long? BestTargetId { get; set; }
@@ -517,7 +518,7 @@ namespace AutoExile.Systems
 
                     var npcx = (int)snapshot.Combat.DenseClusterCenter.X - minX;
                     var npcy = (int)snapshot.Combat.DenseClusterCenter.Y - minY;
-                    DrawCross(pixels, w, h, npcx, npcy, 4, Color.FromArgb(255, 255, 200, 50)); // yellow X = nearby pack center
+                    DrawCross(pixels, w, h, npcx, npcy, 4, Color.FromArgb(255, 255, 200, 50)); // yellow X = dense cluster center
                 }
             }
 
@@ -643,9 +644,12 @@ namespace AutoExile.Systems
                     {
                         ["inCombat"] = snapshot.Combat.InCombat,
                         ["nearbyMonsterCount"] = snapshot.Combat.NearbyMonsterCount,
-                        ["nearbyChaseCount"] = snapshot.Combat.NearbyChaseCount,
+                        ["cachedMonsterCount"] = snapshot.Combat.CachedMonsterCount,
                         ["packCenter"] = new[] { Math.Round(snapshot.Combat.PackCenter.X, 1), Math.Round(snapshot.Combat.PackCenter.Y, 1) },
-                        ["nearbyPackCenter"] = new[] { Math.Round(snapshot.Combat.DenseClusterCenter.X, 1), Math.Round(snapshot.Combat.DenseClusterCenter.Y, 1) },
+                        ["denseClusterCenter"] = new[] { Math.Round(snapshot.Combat.DenseClusterCenter.X, 1), Math.Round(snapshot.Combat.DenseClusterCenter.Y, 1) },
+                        ["nearestMonsterPos"] = snapshot.Combat.NearestMonsterPos.HasValue
+                            ? new[] { Math.Round(snapshot.Combat.NearestMonsterPos.Value.X, 1), Math.Round(snapshot.Combat.NearestMonsterPos.Value.Y, 1) }
+                            : null,
                         ["lastAction"] = snapshot.Combat.LastAction,
                         ["lastSkillAction"] = snapshot.Combat.LastSkillAction,
                         ["bestTargetId"] = snapshot.Combat.BestTargetId ?? 0L,

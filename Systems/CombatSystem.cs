@@ -18,11 +18,14 @@ namespace AutoExile.Systems
         /// <summary>Whether hostile monsters are nearby and combat is active.</summary>
         public bool InCombat { get; private set; }
 
-        /// <summary>Number of alive hostile monsters in the network bubble.</summary>
+        /// <summary>Number of alive hostile monsters within CombatRange.</summary>
         public int NearbyMonsterCount { get; private set; }
 
-        /// <summary>Number of monsters within chase radius (used for positioning decisions).</summary>
-        public int NearbyChaseCount { get; private set; }
+        /// <summary>Total number of alive hostile monsters in the entity list (awareness tier).</summary>
+        public int CachedMonsterCount { get; private set; }
+
+        /// <summary>Grid position of the nearest alive hostile monster (for mode navigation).</summary>
+        public Vector2? NearestMonsterPos { get; private set; }
 
         /// <summary>Best target entity (highest priority: rarity + distance).</summary>
         public Entity? BestTarget { get; private set; }
@@ -35,6 +38,7 @@ namespace AutoExile.Systems
 
         /// <summary>Nearest corpse position for offering skills (grid coords).</summary>
         public Vector2? NearestCorpse { get; private set; }
+
 
         /// <summary>Player HP percentage (0-1) last tick.</summary>
         public float HpPercent { get; private set; }
@@ -173,7 +177,8 @@ namespace AutoExile.Systems
         {
             InCombat = false;
             NearbyMonsterCount = 0;
-            NearbyChaseCount = 0;
+            CachedMonsterCount = 0;
+            NearestMonsterPos = null;
             BestTarget = null;
             PackCenter = Vector2.Zero;
             DenseClusterCenter = Vector2.Zero;
@@ -210,18 +215,6 @@ namespace AutoExile.Systems
         // Threat scanning
         // ═══════════════════════════════════════════════════
 
-        /// <summary>
-        /// Minimum monsters within chase radius before combat repositioning kicks in.
-        /// Prevents chasing lone stragglers across the map.
-        /// </summary>
-        private const int MinChaseMonsters = 3;
-
-        /// <summary>
-        /// Max grid distance to reposition toward monsters.
-        /// Beyond this, skills fire opportunistically but we don't walk toward them.
-        /// </summary>
-        private const float ChaseRadius = 80f;
-
         /// <summary>Cluster radius for density calculation — monsters within this grid distance count as neighbors.</summary>
         private const float DensityClusterRadius = 25f;
 
@@ -231,14 +224,17 @@ namespace AutoExile.Systems
         private void ScanThreats(GameController gc, BotSettings.BuildSettings settings)
         {
             var playerGrid = gc.Player.GridPosNum;
+            float combatRange = settings.CombatRange.Value;
 
             Entity? bestTarget = null;
             float bestScore = float.MinValue;
-            int count = 0;
-            int nearbyCount = 0;
-            var packSum = Vector2.Zero;
+            int combatCount = 0;    // within CombatRange
+            int cachedCount = 0;    // all alive hostiles
+            var combatSum = Vector2.Zero;
             float nearestCorpseDist = float.MaxValue;
             Vector2? nearestCorpse = null;
+            float nearestMonsterDist = float.MaxValue;
+            Vector2? nearestMonsterPos = null;
 
             _nearbyMonsterPositions.Clear();
 
@@ -250,7 +246,7 @@ namespace AutoExile.Systems
                 var dist = Vector2.Distance(entity.GridPosNum, playerGrid);
 
                 // Corpse detection (dead but still in world)
-                if (!entity.IsAlive && dist < settings.CorpseSearchRadius.Value)
+                if (!entity.IsAlive && dist < combatRange)
                 {
                     if (dist < nearestCorpseDist)
                     {
@@ -262,18 +258,23 @@ namespace AutoExile.Systems
 
                 if (!entity.IsAlive || !entity.IsTargetable) continue;
 
-                count++;
-                packSum += entity.GridPosNum;
+                cachedCount++;
 
-                if (dist <= ChaseRadius)
+                // Track nearest monster (for awareness-tier navigation)
+                if (dist < nearestMonsterDist)
                 {
-                    nearbyCount++;
-                    _nearbyMonsterPositions.Add(entity.GridPosNum);
+                    nearestMonsterDist = dist;
+                    nearestMonsterPos = entity.GridPosNum;
                 }
 
+                // Only count monsters within CombatRange for combat decisions
+                if (dist > combatRange) continue;
+
+                combatCount++;
+                combatSum += entity.GridPosNum;
+                _nearbyMonsterPositions.Add(entity.GridPosNum);
+
                 // Score: rarity weight - distance penalty
-                // Priority targets (totems granting invulnerability) get massive weight
-                // so they are always targeted first — monsters near them are unkillable otherwise
                 float rarityWeight = entity.Rarity switch
                 {
                     MonsterRarity.Magic => 2f,
@@ -293,15 +294,15 @@ namespace AutoExile.Systems
                 }
             }
 
-            NearbyMonsterCount = count;
-            NearbyChaseCount = nearbyCount;
+            NearbyMonsterCount = combatCount;
+            CachedMonsterCount = cachedCount;
             BestTarget = bestTarget;
-            InCombat = count > 0;
-            PackCenter = count > 0 ? packSum / count : playerGrid;
+            InCombat = combatCount > 0;
+            PackCenter = combatCount > 0 ? combatSum / combatCount : playerGrid;
             NearestCorpse = nearestCorpse;
+            NearestMonsterPos = nearestMonsterPos;
 
-            // If best target is a priority target (e.g. cannot-die totem), override positioning
-            // to walk on top of it — ensures minions/summons engage it even without cursor-targeted skills
+            // If best target is a priority target, override positioning
             if (bestTarget != null && IsPriorityTarget(bestTarget))
                 DenseClusterCenter = bestTarget.GridPosNum;
             else
@@ -789,53 +790,45 @@ namespace AutoExile.Systems
             var gc = ctx.Game;
             var settings = ctx.Settings.Build;
 
-            if (BestTarget == null) return;
-
-            // Aggressive mode chases ANY monster (retaliatory builds need to be on top of mobs).
-            // Other modes require a minimum pack size or rare/unique to avoid chasing stragglers.
-            bool worthChasing = Profile.Positioning == CombatPositioning.Aggressive
-                ? NearbyChaseCount > 0
-                : NearbyChaseCount >= MinChaseMonsters
-                    || BestTarget.Rarity == MonsterRarity.Rare
-                    || BestTarget.Rarity == MonsterRarity.Unique;
-            if (!worthChasing) return;
+            if (BestTarget == null || NearbyMonsterCount == 0) return;
 
             var playerGrid = gc.Player.GridPosNum;
             float dist = Vector2.Distance(playerGrid, DenseClusterCenter);
+            float fightRange = settings.FightRange.Value;
 
             Vector2? desiredGridPos = null;
 
             switch (Profile.Positioning)
             {
                 case CombatPositioning.Aggressive:
-                    // Walk directly into the densest pack.
+                    // Always walk into the densest pack
                     if (dist > 3f)
                         desiredGridPos = DenseClusterCenter;
                     break;
 
-                case CombatPositioning.Orbit:
-                    float orbitDist = settings.OrbitRange.Value;
-                    if (dist < orbitDist * 0.6f)
-                    {
-                        var awayDir = SafeNormalize(playerGrid - DenseClusterCenter);
-                        desiredGridPos = playerGrid + awayDir * orbitDist * 0.4f;
-                    }
-                    else if (dist > orbitDist * 1.4f)
-                    {
+                case CombatPositioning.Melee:
+                    // Walk toward pack until within fight range
+                    if (dist > fightRange)
                         desiredGridPos = DenseClusterCenter;
-                    }
                     break;
 
                 case CombatPositioning.Ranged:
-                    float safeRange = settings.RangedRange.Value;
-                    if (dist < safeRange * 0.5f)
+                    // Orbit around pack at roughly fight range
+                    // Move perpendicular to pack direction — never retreat, just circle
+                    if (dist > fightRange * 1.5f)
                     {
-                        var awayDir = SafeNormalize(playerGrid - DenseClusterCenter);
-                        desiredGridPos = playerGrid + awayDir * safeRange * 0.5f;
+                        // Too far — close in
+                        desiredGridPos = DenseClusterCenter;
                     }
-                    break;
-
-                case CombatPositioning.Stationary:
+                    else if (dist > fightRange * 0.5f)
+                    {
+                        // In orbit zone — move perpendicular to pack direction
+                        var toPack = DenseClusterCenter - playerGrid;
+                        var perpendicular = new Vector2(-toPack.Y, toPack.X); // 90 degree rotation
+                        perpendicular = SafeNormalize(perpendicular);
+                        desiredGridPos = playerGrid + perpendicular * fightRange * 0.5f;
+                    }
+                    // else: inside fight range — don't retreat, let skills fire
                     break;
             }
 
@@ -928,7 +921,7 @@ namespace AutoExile.Systems
             // Per-skill conditions
             public SkillTargetFilter TargetFilter;
             public int MinNearbyEnemies;
-            public float MaxTargetRange;
+            public int MaxTargetRange;
             public bool OnlyWhenBuffMissing;
             public bool OnlyOnLowLife;
             public bool SummonRecast;
@@ -979,10 +972,9 @@ namespace AutoExile.Systems
 
     public enum CombatPositioning
     {
-        Aggressive,     // Walk into densest pack (RF, melee)
-        Orbit,          // Medium range orbit (summoner, DoT)
-        Ranged,         // Max range kiting (caster, archer)
-        Stationary,     // Stand at current position (blight tower phase)
+        Aggressive,     // Walk into densest pack (RF, melee builds that want to be hit)
+        Melee,          // Get within fight range of pack (attack skills, close-range casters)
+        Ranged,         // Orbit around pack at fight range (ranged, summoner, DoT)
     }
 
     /// <summary>
@@ -992,9 +984,6 @@ namespace AutoExile.Systems
     {
         /// <summary>Whether combat is active at all.</summary>
         public bool Enabled { get; set; }
-
-        /// <summary>Override engage radius (0 = use settings default).</summary>
-        public float EngageRadius { get; set; }
 
         /// <summary>How to position relative to monsters.</summary>
         public CombatPositioning Positioning { get; set; } = CombatPositioning.Aggressive;

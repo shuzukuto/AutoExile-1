@@ -117,19 +117,11 @@ namespace AutoExile
             [Menu("Default Positioning", "How to position relative to monsters. Modes can override.")]
             public ListNode DefaultPositioning { get; set; } = new ListNode();
 
-            [Menu("Corpse Search Radius", "Max grid distance to find corpses for offering skills.")]
-            public RangeNode<float> CorpseSearchRadius { get; set; } = new RangeNode<float>(60f, 10f, 120f);
+            [Menu("Fight Range", "Preferred grid distance to fight monsters from. Melee/Ranged positioning target. Aggressive ignores this.")]
+            public RangeNode<int> FightRange { get; set; } = new RangeNode<int>(40, 5, 80);
 
-            // ── Positioning Ranges ──
-
-            [Menu("Melee Range", "Move within this grid distance for aggressive positioning.")]
-            public RangeNode<float> MeleeRange { get; set; } = new RangeNode<float>(15f, 5f, 40f);
-
-            [Menu("Orbit Range", "Maintain this grid distance for summoner/orbit positioning.")]
-            public RangeNode<float> OrbitRange { get; set; } = new RangeNode<float>(40f, 15f, 80f);
-
-            [Menu("Ranged Range", "Stay at least this grid distance for ranged positioning.")]
-            public RangeNode<float> RangedRange { get; set; } = new RangeNode<float>(60f, 20f, 120f);
+            [Menu("Combat Range", "Grid distance threshold for 'in combat'. Monsters within this trigger positioning and skills.")]
+            public RangeNode<int> CombatRange { get; set; } = new RangeNode<int>(80, 20, 200);
 
             // ── Guard / Defensive Thresholds ──
 
@@ -212,7 +204,7 @@ namespace AutoExile
             public RangeNode<int> MinNearbyEnemies { get; set; } = new RangeNode<int>(0, 0, 30);
 
             [Menu("Max Target Range", "Only use when target is within this grid distance. 0=disabled (use engage radius).")]
-            public RangeNode<float> MaxTargetRange { get; set; } = new RangeNode<float>(0f, 0f, 200f);
+            public RangeNode<int> MaxTargetRange { get; set; } = new RangeNode<int>(0, 0, 200);
 
             [Menu("Only When Buff Missing", "Skip if buff/debuff is already active — checks player buffs (Self) or target debuffs (Enemy).")]
             public ToggleNode OnlyWhenBuffMissing { get; set; } = new ToggleNode(false);
@@ -259,7 +251,7 @@ namespace AutoExile
         public class LootSettings
         {
             [Menu("Loot Radius", "Click items within this grid distance without pathing. Items beyond this require navigation first.")]
-            public RangeNode<float> LootRadius { get; set; } = new RangeNode<float>(20f, 10f, 80f);
+            public RangeNode<int> LootRadius { get; set; } = new RangeNode<int>(20, 10, 80);
 
             [Menu("Skip Low-Value Uniques", "Skip unique items below the minimum chaos value.")]
             public ToggleNode SkipLowValueUniques { get; set; } = new ToggleNode(false);
@@ -305,23 +297,20 @@ namespace AutoExile
             [Menu("Tower Click Cooldown (ms)", "Min time between individual click actions (label, menu button).")]
             public RangeNode<int> TowerClickCooldownMs { get; set; } = new RangeNode<int>(200, 50, 1000);
 
-            [Menu("Tower Approach Distance", "Navigate this close to towers before clicking (grid units).")]
-            public RangeNode<float> TowerApproachDistance { get; set; } = new RangeNode<float>(40f, 10f, 60f);
+            [Menu("Tower Approach Distance", "Navigate this close to towers before clicking — close enough to see full build/upgrade UI (grid units).")]
+            public RangeNode<float> TowerApproachDistance { get; set; } = new RangeNode<float>(25f, 10f, 60f);
 
             [Menu("Sweep Delay After Timer (s)", "Wait this long after timer ends before starting sweep (mobs still spawning).")]
             public RangeNode<float> SweepDelayAfterTimerSeconds { get; set; } = new RangeNode<float>(30f, 5f, 60f);
 
-            [Menu("Sweep Timeout (s)", "Global max time in sweep phase before giving up.")]
-            public RangeNode<float> SweepTimeoutSeconds { get; set; } = new RangeNode<float>(120f, 30f, 300f);
+            [Menu("Sweep Timeout (s)", "Max time in sweep phase with no monsters found before giving up. Resets when monsters are found or killed.")]
+            public RangeNode<float> SweepTimeoutSeconds { get; set; } = new RangeNode<float>(180f, 60f, 600f);
 
-            [Menu("Sweep Patrol Lane Timeout (s)", "Max time per lane during patrol.")]
-            public RangeNode<float> SweepPatrolLaneTimeoutSeconds { get; set; } = new RangeNode<float>(30f, 10f, 60f);
+            [Menu("Sweep Pump Return (s)", "Max seconds away from pump before forced return — refreshes encounter state and checks for threats from other directions.")]
+            public RangeNode<float> SweepPumpReturnSeconds { get; set; } = new RangeNode<float>(30f, 10f, 60f);
 
-            [Menu("Sweep Pump Leash Radius", "Soft max grid distance from pump during patrol.")]
-            public RangeNode<float> SweepPumpLeashRadius { get; set; } = new RangeNode<float>(60f, 28f, 138f);
-
-            [Menu("Sweep Pump Danger Radius", "Rush back if monster this close to pump (grid units).")]
-            public RangeNode<float> SweepPumpDangerRadius { get; set; } = new RangeNode<float>(28f, 9f, 55f);
+            [Menu("Sweep Pump Radius", "Grid distance from pump considered 'near pump' — resets the return timer when inside this radius.")]
+            public RangeNode<float> SweepPumpRadius { get; set; } = new RangeNode<float>(80f, 30f, 150f);
 
             [Menu("Stash Item Cooldown (ms)", "Delay between each Ctrl+click when stashing items.")]
             public RangeNode<int> StashItemCooldownMs { get; set; } = new RangeNode<int>(450, 200, 1000);

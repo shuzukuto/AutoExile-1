@@ -65,7 +65,7 @@ namespace AutoExile.Systems
         public int Currency { get; private set; }
 
         // Portal tracking — cache position when first seen in map for exit navigation
-        public Vector2? PortalPosition { get; private set; }
+        public Vector2? PortalPosition { get; set; }
 
         // Map completion tracking
         public bool MapComplete { get; set; }

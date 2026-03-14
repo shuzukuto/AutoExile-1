@@ -1415,14 +1415,12 @@ namespace AutoExile.Mechanics
             {
                 Enabled = ctx.Combat.Profile.Enabled,
                 Positioning = ctx.Combat.Profile.Positioning,
-                EngageRadius = ctx.Combat.Profile.EngageRadius,
             };
 
             ctx.Combat.SetProfile(new CombatProfile
             {
                 Enabled = true,
                 Positioning = CombatPositioning.Aggressive,
-                EngageRadius = 80,
             });
         }
 

@@ -923,7 +923,7 @@ namespace AutoExile.Modes
 
             if (EnableCombat && ctx.Combat.InCombat)
             {
-                gfx.DrawText($"Combat: {ctx.Combat.NearbyChaseCount} nearby", new Vector2(hudX, hudY), SharpDX.Color.Red);
+                gfx.DrawText($"Combat: {ctx.Combat.NearbyMonsterCount} nearby", new Vector2(hudX, hudY), SharpDX.Color.Red);
                 hudY += lineH;
             }
 
