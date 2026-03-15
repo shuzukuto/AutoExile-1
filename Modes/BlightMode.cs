@@ -49,6 +49,12 @@ namespace AutoExile.Modes
         private int _sweepCombatEngageCount;
         private const float SweepCombatStuckSeconds = 15f;
 
+        // Pump click verification
+        private int _pumpClickAttempts;
+        private DateTime _lastPumpClickAt = DateTime.MinValue;
+        private const int MaxPumpClickAttempts = 6;
+        private const float PumpClickVerifyDelayMs = 1500f; // wait after click before retrying
+
         // Action cooldown for major actions (pump click, fast-forward)
         private const float MajorActionCooldownMs = 500f;
 
@@ -344,11 +350,22 @@ namespace AutoExile.Modes
 
             if (_blight.IsEncounterActive)
             {
-                ctx.Navigation.Stop(ctx.Game);
-                _phase = BlightPhase.TowerManagement;
-                _phaseStartTime = DateTime.Now;
-                StatusText = "Encounter active — managing towers";
-                return;
+                // Require positive proof: pump StateMachine "activated > 0", or pump gone + monsters
+                var pump = FindPumpEntity(ctx.Game);
+                bool confirmed = (pump != null && IsPumpActivated(pump))
+                    || (pump == null && _blight.AliveMonsterCount > 5);
+
+                if (confirmed)
+                {
+                    ctx.Navigation.Stop(ctx.Game);
+                    _phase = BlightPhase.TowerManagement;
+                    _phaseStartTime = DateTime.Now;
+                    StatusText = "Encounter confirmed — managing towers";
+                    return;
+                }
+
+                // False positive — reset and continue navigating
+                _blight.IsEncounterActive = false;
             }
 
             var playerPos = ctx.Game.Player.GridPosNum;
@@ -359,6 +376,7 @@ namespace AutoExile.Modes
                 ctx.Navigation.Stop(ctx.Game);
                 _phase = BlightPhase.StartEncounter;
                 _phaseStartTime = DateTime.Now;
+                _pumpClickAttempts = 0;
                 StatusText = "Near pump — starting encounter";
                 return;
             }
@@ -379,18 +397,58 @@ namespace AutoExile.Modes
 
         private void TickStartEncounter(BotContext ctx)
         {
-            if (_blight.IsEncounterActive)
+            var gc = ctx.Game;
+            Entity? pump = FindPumpEntity(gc);
+
+            // The ONLY way to advance: positive confirmation that pump StateMachine
+            // has "activated > 0". Don't trust IsEncounterActive (non-targetable fallback
+            // can false-positive). Don't trust "pump disappeared". Require hard proof.
+            if (pump != null && IsPumpActivated(pump))
             {
                 _phase = BlightPhase.FastForward;
                 _phaseStartTime = DateTime.Now;
-                StatusText = "Encounter started — waiting for fast-forward";
+                _pumpClickAttempts = 0;
+                StatusText = "Encounter confirmed (activated) — waiting for fast-forward";
+                return;
+            }
+
+            // Secondary confirmation: pump entity gone + monsters spawning = encounter started
+            // (pump entity can unload from entity list after activation)
+            if (pump == null && _blight.IsEncounterActive && _blight.AliveMonsterCount > 5)
+            {
+                _phase = BlightPhase.FastForward;
+                _phaseStartTime = DateTime.Now;
+                _pumpClickAttempts = 0;
+                StatusText = "Encounter confirmed (monsters spawning) — waiting for fast-forward";
+                return;
+            }
+
+            // If IsEncounterActive got set but we can't confirm it, reset the false positive
+            if (_blight.IsEncounterActive && pump != null && !IsPumpActivated(pump))
+            {
+                _blight.IsEncounterActive = false;
+            }
+
+            // After clicking, wait for verification delay before retrying
+            if (_pumpClickAttempts > 0)
+            {
+                var msSinceClick = (DateTime.Now - _lastPumpClickAt).TotalMilliseconds;
+                if (msSinceClick < PumpClickVerifyDelayMs)
+                {
+                    StatusText = $"Verifying pump click ({_pumpClickAttempts}/{MaxPumpClickAttempts}, {msSinceClick:F0}ms)...";
+                    return;
+                }
+            }
+
+            if (_pumpClickAttempts >= MaxPumpClickAttempts)
+            {
+                StatusText = $"Failed to start encounter after {MaxPumpClickAttempts} click attempts";
+                _phase = BlightPhase.Done;
                 return;
             }
 
             if (!ModeHelpers.CanAct(_lastActionTime, MajorActionCooldownMs)) return;
 
-            var gc = ctx.Game;
-            Entity? pump = FindPumpEntity(gc);
             if (pump == null)
             {
                 StatusText = "Pump entity not found for clicking";
@@ -417,13 +475,32 @@ namespace AutoExile.Modes
             }
 
             ModeHelpers.ClickEntity(gc, pump, ref _lastActionTime);
-            StatusText = "Clicking pump to start encounter";
+            _pumpClickAttempts++;
+            _lastPumpClickAt = DateTime.Now;
+            StatusText = $"Clicking pump to start encounter (attempt {_pumpClickAttempts}/{MaxPumpClickAttempts})";
 
             if ((DateTime.Now - _phaseStartTime).TotalSeconds > 30)
             {
                 StatusText = "Timeout starting encounter";
                 _phase = BlightPhase.Done;
             }
+        }
+
+        /// <summary>
+        /// Check if pump StateMachine has "activated > 0" — the definitive proof
+        /// that the encounter has actually started. This is the ONLY reliable signal;
+        /// IsTargetable changes and other fallbacks can false-positive.
+        /// </summary>
+        private static bool IsPumpActivated(Entity pump)
+        {
+            if (!pump.TryGetComponent<StateMachine>(out var states))
+                return false;
+            foreach (var s in states.States)
+            {
+                if (s.Name == "activated" && s.Value > 0)
+                    return true;
+            }
+            return false;
         }
 
         private void TickFastForward(BotContext ctx)
@@ -468,9 +545,21 @@ namespace AutoExile.Modes
 
             if ((DateTime.Now - _phaseStartTime).TotalSeconds > 10)
             {
-                _blight.HasClickedFastForward = true;
-                _phase = BlightPhase.TowerManagement;
-                StatusText = "Fast-forward timeout — managing towers";
+                // Only advance on timeout if encounter is genuinely active (monsters, timer, etc.)
+                if (_blight.IsEncounterActive)
+                {
+                    _blight.HasClickedFastForward = true;
+                    _phase = BlightPhase.TowerManagement;
+                    StatusText = "Fast-forward timeout — managing towers";
+                }
+                else
+                {
+                    // Encounter never actually started — go back to StartEncounter to retry
+                    _phase = BlightPhase.StartEncounter;
+                    _phaseStartTime = DateTime.Now;
+                    _pumpClickAttempts = 0;
+                    StatusText = "Fast-forward timeout but encounter not active — retrying pump";
+                }
             }
         }
 
@@ -544,6 +633,15 @@ namespace AutoExile.Modes
             if (ctx.Interaction.IsBusy)
                 return;
 
+            // Combat priority — cancel tower navigation if monsters are nearby.
+            // Tower building shouldn't override combat; let CombatSystem handle threats first.
+            if (_towerAction != null && ctx.Combat.NearbyMonsterCount > 0)
+            {
+                CancelTowerAction(ctx);
+                StatusText = $"Fighting — {ctx.Combat.NearbyMonsterCount} nearby (tower action cancelled)";
+                return;
+            }
+
             // Tick active tower action
             if (_towerAction != null)
             {
@@ -584,6 +682,14 @@ namespace AutoExile.Modes
                 return;
             }
 
+            // Don't start new tower actions if pump is under attack — return to defend
+            if (_blight.PumpUnderAttack)
+            {
+                TickSafetyPosition(ctx);
+                StatusText = $"Pump under attack — defending ({_blight.AliveMonsterCount} monsters)";
+                return;
+            }
+
             // Try upgrade first, then build
             if (!TryStartTowerAction(ctx, TowerAction.ActionType.Upgrade))
                 TryStartTowerAction(ctx, TowerAction.ActionType.Build);
@@ -603,20 +709,20 @@ namespace AutoExile.Modes
         /// </summary>
         private void TickSafetyPosition(BotContext ctx)
         {
-            if (!_blight.PumpPosition.HasValue) return;
+            if (!_blight.DefensePosition.HasValue) return;
             var gc = ctx.Game;
             var playerPos = gc.Player.GridPosNum;
-            var pumpPos = _blight.PumpPosition.Value;
-            var distToPump = Vector2.Distance(playerPos, pumpPos);
+            var defensePos = _blight.DefensePosition.Value;
+            var distToDefense = Vector2.Distance(playerPos, defensePos);
 
-            // Safety radius — stay reasonably close to pump between tower actions
+            // Safety radius — stay reasonably close to the defense point (lane hub)
             float safetyRadius = 30f;
 
-            if (distToPump > safetyRadius && !ctx.Navigation.IsNavigating)
+            if (distToDefense > safetyRadius && !ctx.Navigation.IsNavigating)
             {
-                // Move back toward pump (but not on top of it)
-                var dir = Vector2.Normalize(pumpPos - playerPos);
-                var targetPos = pumpPos - dir * 10f; // stand 10 grid units from pump
+                // Move back toward defense point (but not on top of it)
+                var dir = Vector2.Normalize(defensePos - playerPos);
+                var targetPos = defensePos - dir * 10f; // stand 10 grid units from hub
                 ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(targetPos));
             }
         }
@@ -670,8 +776,8 @@ namespace AutoExile.Modes
 
             var gc = ctx.Game;
             var playerPos = gc.Player.GridPosNum;
-            var pumpPos = _blight.PumpPosition ?? playerPos;
-            var distToPump = Vector2.Distance(playerPos, pumpPos);
+            var defensePos = _blight.DefensePosition ?? playerPos;
+            var distToDefense = Vector2.Distance(playerPos, defensePos);
             var now = DateTime.Now;
 
             var pumpRadius = _settings.SweepPumpRadius.Value;
@@ -679,7 +785,7 @@ namespace AutoExile.Modes
 
             // --- Track pump proximity timer ---
             // Reset timer when inside pump radius, start/continue when outside
-            if (distToPump <= pumpRadius)
+            if (distToDefense <= pumpRadius)
             {
                 _sweepLastOutsidePumpAt = DateTime.MinValue;
                 _sweepReturningToPump = false;
@@ -697,7 +803,7 @@ namespace AutoExile.Modes
             if (_sweepReturningToPump || awayTooLong)
             {
                 _sweepReturningToPump = true;
-                if (distToPump < 18f)
+                if (distToDefense < 18f)
                 {
                     // Arrived at pump — reset and resume sweep
                     _sweepReturningToPump = false;
@@ -712,8 +818,8 @@ namespace AutoExile.Modes
                 }
 
                 if (!ctx.Navigation.IsNavigating)
-                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(pumpPos));
-                StatusText = $"Returning to pump (dist: {distToPump:F0})";
+                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(defensePos));
+                StatusText = $"Returning to defense point (dist: {distToDefense:F0})";
                 return;
             }
 
@@ -752,7 +858,7 @@ namespace AutoExile.Modes
                             ctx.Exploration.ResetSeen();
                     }
                     StatusText = $"Combat stuck ({combatElapsed:F0}s) — moving on ({ctx.Combat.NearbyMonsterCount} unreachable)";
-                    TickSweepExplore(ctx, playerPos, pumpPos);
+                    TickSweepExplore(ctx, playerPos, defensePos);
                 }
                 else
                 {
@@ -779,7 +885,7 @@ namespace AutoExile.Modes
                 _sweepCombatEngageCount = 0;
 
                 // Find the monster closest to pump (biggest threat)
-                var nearestToPumpPos = FindMonsterClosestToPump(gc, pumpPos);
+                var nearestToPumpPos = FindMonsterClosestToDefense(gc, defensePos);
                 if (nearestToPumpPos.HasValue)
                 {
                     var monsterDist = Vector2.Distance(playerPos, nearestToPumpPos.Value);
@@ -800,14 +906,14 @@ namespace AutoExile.Modes
             _sweepCombatEngageTime = DateTime.MinValue;
             _sweepCombatEngageCount = 0;
 
-            TickSweepExplore(ctx, playerPos, pumpPos);
+            TickSweepExplore(ctx, playerPos, defensePos);
         }
 
         /// <summary>
-        /// Explore the map to find remaining monsters. Falls back to orbiting the pump
+        /// Explore the map to find remaining monsters. Falls back to orbiting the defense point
         /// when exploration is exhausted.
         /// </summary>
-        private void TickSweepExplore(BotContext ctx, Vector2 playerPos, Vector2 pumpPos)
+        private void TickSweepExplore(BotContext ctx, Vector2 playerPos, Vector2 defensePos)
         {
             var gc = ctx.Game;
 
@@ -830,22 +936,22 @@ namespace AutoExile.Modes
                 }
             }
 
-            // Exploration exhausted — orbit the pump to find stragglers
-            if (_blight.PumpPosition.HasValue)
+            // Exploration exhausted — orbit the defense point to find stragglers
+            if (_blight.DefensePosition.HasValue)
             {
-                var distToPump = Vector2.Distance(playerPos, pumpPos);
-                if (distToPump > 60f)
+                var distOrbit = Vector2.Distance(playerPos, defensePos);
+                if (distOrbit > 60f)
                 {
-                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(pumpPos));
-                    StatusText = $"Sweep: returning to pump (exploration exhausted, dist: {distToPump:F0})";
+                    ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(defensePos));
+                    StatusText = $"Sweep: returning to defense point (exploration exhausted, dist: {distOrbit:F0})";
                     return;
                 }
-                if (distToPump < 30f)
+                if (distOrbit < 30f)
                 {
                     var angle = (float)(DateTime.Now.Ticks % 6283) / 1000f;
-                    var orbitTarget = pumpPos + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 50f;
+                    var orbitTarget = defensePos + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 50f;
                     ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(orbitTarget));
-                    StatusText = $"Sweep: orbiting pump ({ctx.Combat.CachedMonsterCount} alive)";
+                    StatusText = $"Sweep: orbiting defense point ({ctx.Combat.CachedMonsterCount} alive)";
                     return;
                 }
             }
@@ -854,10 +960,10 @@ namespace AutoExile.Modes
         }
 
         /// <summary>
-        /// Find the alive hostile monster closest to the pump (biggest threat).
+        /// Find the alive hostile monster closest to the defense point (biggest threat).
         /// Uses OnlyValidEntities (entity list), not blight-specific cache.
         /// </summary>
-        private static Vector2? FindMonsterClosestToPump(GameController gc, Vector2 pumpPos)
+        private static Vector2? FindMonsterClosestToDefense(GameController gc, Vector2 defensePos)
         {
             float bestDist = float.MaxValue;
             Vector2? bestPos = null;
@@ -867,7 +973,7 @@ namespace AutoExile.Modes
                 if (entity.Type != EntityType.Monster || !entity.IsHostile) continue;
                 if (!entity.IsAlive || !entity.IsTargetable) continue;
 
-                var dist = Vector2.Distance(entity.GridPosNum, pumpPos);
+                var dist = Vector2.Distance(entity.GridPosNum, defensePos);
                 if (dist < bestDist)
                 {
                     bestDist = dist;
@@ -1161,7 +1267,7 @@ namespace AutoExile.Modes
 
             var playerZ = gc.Player.PosNum.Z;
 
-            // Pump + build radius
+            // Pump entity (clickable)
             if (_blight.PumpPosition.HasValue)
             {
                 var pumpWorld = BlightState.ToWorld3(_blight.PumpPosition.Value, playerZ);
@@ -1170,6 +1276,14 @@ namespace AutoExile.Modes
 
                 float buildRadiusWorld = _settings.TowerBuildRadius.Value * Systems.Pathfinding.GridToWorld;
                 g.DrawCircleInWorld(pumpWorld, buildRadiusWorld, new SharpDX.Color(255, 200, 0, 40), 1.5f);
+            }
+
+            // Defense point (lane hub — where monsters converge)
+            if (_blight.DefensePosition.HasValue && _blight.DefensePosition != _blight.PumpPosition)
+            {
+                var defWorld = BlightState.ToWorld3(_blight.DefensePosition.Value, playerZ);
+                g.DrawText("DEFEND", cam.WorldToScreen(defWorld), SharpDX.Color.Cyan);
+                g.DrawCircleInWorld(defWorld, 30f, SharpDX.Color.Cyan, 2f);
             }
 
             // Active tower target

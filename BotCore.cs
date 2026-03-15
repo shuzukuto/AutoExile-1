@@ -305,10 +305,8 @@ namespace AutoExile
             _interaction.InteractRadius = Settings.Loot.LootRadius.Value;
             _loot.IgnoreQuestItems = Settings.Loot.IgnoreQuestItems.Value;
 
-            // Sync stash settings — use active mode's cooldown
-            _stash.ActionCooldownMs = _mode == _simulacrumMode
-                ? Settings.Simulacrum.StashItemCooldownMs.Value
-                : Settings.Blight.StashItemCooldownMs.Value;
+            // Sync stash settings
+            _stash.ActionCooldownMs = Settings.Loot.StashItemCooldownMs.Value;
             _stash.ApplyIncubators = Settings.AutoApplyIncubators.Value;
 
             // Only run full mode logic when running

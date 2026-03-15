@@ -19,6 +19,14 @@ namespace AutoExile.Systems
         public List<List<Vector2>> Lanes { get; private set; } = new();
         public int TotalPathways { get; private set; }
 
+        /// <summary>
+        /// The grid position where multiple lanes converge — the actual point monsters
+        /// attack. This is NOT the clickable pump entity position. Computed as the pathway
+        /// position with the most overlapping entities (the hub/root of all lanes).
+        /// Null until lanes are reconstructed with pathway data.
+        /// </summary>
+        public Vector2? HubPosition { get; private set; }
+
         // Per-lane intelligence (indices match Lanes list)
         public float[] LaneThreat { get; private set; } = Array.Empty<float>();
         public float[] LaneCoverage { get; private set; } = Array.Empty<float>();
@@ -164,6 +172,39 @@ namespace AutoExile.Systems
             LaneThreat = new float[Lanes.Count];
             LaneCoverage = new float[Lanes.Count];
             LaneDanger = new float[Lanes.Count];
+
+            // Compute hub position — the pathway grid cell with the most overlapping entities.
+            // This is where all lanes converge and where monsters actually attack.
+            ComputeHubPosition(pathways);
+        }
+
+        private void ComputeHubPosition(List<(long Id, Vector2 Pos)> pathways)
+        {
+            // Count how many pathway entities share each grid cell (rounded to int)
+            var cellCounts = new Dictionary<(int X, int Y), (int Count, Vector2 Pos)>();
+            foreach (var (_, pos) in pathways)
+            {
+                var key = ((int)MathF.Round(pos.X), (int)MathF.Round(pos.Y));
+                if (cellCounts.TryGetValue(key, out var existing))
+                    cellCounts[key] = (existing.Count + 1, pos);
+                else
+                    cellCounts[key] = (1, pos);
+            }
+
+            // The hub is the cell with the most overlapping pathways
+            int maxCount = 0;
+            Vector2? bestPos = null;
+            foreach (var (_, (count, pos)) in cellCounts)
+            {
+                if (count > maxCount)
+                {
+                    maxCount = count;
+                    bestPos = pos;
+                }
+            }
+
+            // Only set hub if there's meaningful convergence (3+ pathways at same cell)
+            HubPosition = maxCount >= 3 ? bestPos : null;
         }
 
         /// <summary>
