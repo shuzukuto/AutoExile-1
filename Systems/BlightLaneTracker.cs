@@ -84,6 +84,12 @@ namespace AutoExile.Systems
             "BuffPlayersTower", "WeakenEnemiesTower",
         };
 
+        /// <summary>
+        /// Pump grid position — set by BlightState so hub computation can prefer
+        /// the convergence point closest to the pump rather than an arbitrary branch point.
+        /// </summary>
+        public Vector2? PumpPosition { get; set; }
+
         public bool HasLaneData => Lanes.Count > 0;
 
         /// <summary>
@@ -191,20 +197,38 @@ namespace AutoExile.Systems
                     cellCounts[key] = (1, pos);
             }
 
-            // The hub is the cell with the most overlapping pathways
-            int maxCount = 0;
+            // Among cells with 3+ overlapping pathways, pick the one closest to the pump.
+            // Pathways can overlap at branch points far from the pump — we want the root
+            // convergence, not an arbitrary intersection.
+            var pumpRef = PumpPosition ?? Vector2.Zero;
+            var hasPump = PumpPosition.HasValue;
+            float bestScore = float.MaxValue;
             Vector2? bestPos = null;
             foreach (var (_, (count, pos)) in cellCounts)
             {
-                if (count > maxCount)
+                if (count < 3) continue;
+
+                if (hasPump)
                 {
-                    maxCount = count;
-                    bestPos = pos;
+                    var dist = Vector2.Distance(pos, pumpRef);
+                    if (dist < bestScore)
+                    {
+                        bestScore = dist;
+                        bestPos = pos;
+                    }
+                }
+                else
+                {
+                    // No pump reference — fall back to highest overlap count
+                    if (count > bestScore || bestPos == null)
+                    {
+                        bestScore = count;
+                        bestPos = pos;
+                    }
                 }
             }
 
-            // Only set hub if there's meaningful convergence (3+ pathways at same cell)
-            HubPosition = maxCount >= 3 ? bestPos : null;
+            HubPosition = bestPos;
         }
 
         /// <summary>

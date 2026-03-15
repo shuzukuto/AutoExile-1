@@ -38,6 +38,8 @@ namespace AutoExile.Modes
 
         // Chest opening state
         private Vector2? _currentChestTarget;
+        private DateTime _chestNavStartedAt = DateTime.MinValue;
+        private const float ChestNavTimeoutSeconds = 30f;
 
         // Sweep state
         private bool _sweepWasSearching;
@@ -1093,6 +1095,7 @@ namespace AutoExile.Modes
                 {
                     if (bestDist < 25f)
                     {
+                        // Close enough but no entity found — stale cache entry
                         _blight.ChestPositions.Remove(nearestCachedChest.Value);
                         StatusText = $"Stale chest removed (was at dist {bestDist:F0}, {_blight.ChestPositions.Count} remaining)";
                         return;
@@ -1101,7 +1104,15 @@ namespace AutoExile.Modes
                     if (!ctx.Navigation.IsNavigating)
                     {
                         _lastEmptyScanAt = DateTime.MinValue;
-                        ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(nearestCachedChest.Value));
+                        var pathFound = ctx.Navigation.NavigateTo(gc, BlightState.ToWorld(nearestCachedChest.Value));
+                        if (!pathFound)
+                        {
+                            // Can't path to this chest — remove it and try another next tick
+                            _blight.ChestPositions.Remove(nearestCachedChest.Value);
+                            StatusText = $"No path to chest (dist: {bestDist:F0}) — removed, {_blight.ChestPositions.Count} remaining";
+                            return;
+                        }
+                        _chestNavStartedAt = DateTime.Now;
                         StatusText = $"Navigating to chest (dist: {bestDist:F0}, {_blight.ChestPositions.Count} remaining)";
                         return;
                     }
@@ -1109,6 +1120,30 @@ namespace AutoExile.Modes
 
                 if (ctx.Navigation.IsNavigating)
                 {
+                    // Timeout individual chest navigation — if stuck or path too long, skip it
+                    if (_chestNavStartedAt != DateTime.MinValue
+                        && (DateTime.Now - _chestNavStartedAt).TotalSeconds > ChestNavTimeoutSeconds)
+                    {
+                        ctx.Navigation.Stop(gc);
+                        if (_currentChestTarget.HasValue)
+                            _blight.ChestPositions.Remove(_currentChestTarget.Value);
+                        else if (_blight.ChestPositions.Count > 0)
+                        {
+                            // Remove the nearest cached chest we were heading to
+                            Vector2? nearest = null;
+                            float nd = float.MaxValue;
+                            foreach (var p in _blight.ChestPositions)
+                            {
+                                var d = Vector2.Distance(playerPos, p);
+                                if (d < nd) { nd = d; nearest = p; }
+                            }
+                            if (nearest.HasValue)
+                                _blight.ChestPositions.Remove(nearest.Value);
+                        }
+                        _chestNavStartedAt = DateTime.MinValue;
+                        StatusText = $"Chest nav timeout — skipping, {_blight.ChestPositions.Count} remaining";
+                        return;
+                    }
                     StatusText = $"Walking to chest area ({_blight.ChestPositions.Count} remaining)";
                     return;
                 }

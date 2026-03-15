@@ -501,6 +501,7 @@ namespace AutoExile.Systems
 
         private void TrackLanes(GameController gc)
         {
+            LaneTracker.PumpPosition = PumpPosition;
             LaneTracker.Tick(gc);
 
             if (IsEncounterActive && LaneTracker.HasLaneData)
