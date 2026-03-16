@@ -290,6 +290,15 @@ namespace AutoExile.Systems
 
                 float score = rarityWeight - dist * 0.1f;
 
+                // Defense anchor: heavily favor monsters closer to the objective
+                if (Profile.DefenseAnchor.HasValue)
+                {
+                    float distToObjective = Vector2.Distance(entity.GridPosNum, Profile.DefenseAnchor.Value);
+                    // Monsters within 30 grid units of objective get large bonus,
+                    // scaling down with distance. This dominates over rarity for nearby threats.
+                    score += MathF.Max(0f, 60f - distToObjective);
+                }
+
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -837,6 +846,21 @@ namespace AutoExile.Systems
 
             if (!desiredGridPos.HasValue) return;
 
+            // Enforce leash constraint — clamp desired position to stay within anchor radius
+            if (Profile.LeashAnchor.HasValue)
+            {
+                var anchor = Profile.LeashAnchor.Value;
+                var radius = Profile.LeashRadius;
+                var distFromAnchor = Vector2.Distance(desiredGridPos.Value, anchor);
+                if (distFromAnchor > radius)
+                {
+                    // Pull position back toward anchor to stay within radius
+                    var toDesired = desiredGridPos.Value - anchor;
+                    toDesired = SafeNormalize(toDesired);
+                    desiredGridPos = anchor + toDesired * radius;
+                }
+            }
+
             // Validate the desired position: must be walkable and have targeting LOS to monsters
             var validPos = ctx.Navigation.FindWalkableWithLOS(gc, desiredGridPos.Value, DenseClusterCenter);
             if (!validPos.HasValue) return;
@@ -1003,6 +1027,23 @@ namespace AutoExile.Systems
 
         /// <summary>How to position relative to monsters.</summary>
         public CombatPositioning Positioning { get; set; } = CombatPositioning.Aggressive;
+
+        /// <summary>
+        /// Optional leash anchor in grid coordinates. When set, combat positioning
+        /// will never move the player beyond LeashRadius of this point.
+        /// Used by mechanics like Ultimatum that require staying in a bounded area.
+        /// </summary>
+        public Vector2? LeashAnchor { get; set; }
+
+        /// <summary>Leash radius in grid units. Only used when LeashAnchor is set.</summary>
+        public float LeashRadius { get; set; }
+
+        /// <summary>
+        /// Optional defense anchor in grid coordinates. When set, target scoring
+        /// heavily favors monsters closer to this point (protect-the-objective priority).
+        /// Used by blight sweep to prioritize monsters threatening the pump hub.
+        /// </summary>
+        public Vector2? DefenseAnchor { get; set; }
 
         public static CombatProfile Default => new() { Enabled = false };
     }

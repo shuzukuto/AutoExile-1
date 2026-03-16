@@ -21,6 +21,13 @@ namespace AutoExile.Systems
         public long PumpEntityId { get; private set; }
         public bool IsPumpInRange { get; private set; }
 
+        /// <summary>
+        /// The actual point monsters converge on — the lane hub, NOT the clickable pump.
+        /// Use this for all defense/danger/safety positioning. Falls back to PumpPosition
+        /// if hub hasn't been computed yet (lanes not loaded).
+        /// </summary>
+        public Vector2? DefensePosition => LaneTracker.HubPosition ?? PumpPosition;
+
         // Encounter state (derived from pump StateMachine)
         public bool IsEncounterActive { get; set; }
         public bool IsEncounterDone { get; private set; }
@@ -91,6 +98,8 @@ namespace AutoExile.Systems
         private DateTime _lastCoverageUpdateAt = DateTime.MinValue;
         private DateTime _prevTowerBuildAt = DateTime.MinValue;
         private DateTime _prevTowerUpgradeAt = DateTime.MinValue;
+        private int _pumpNonTargetableTicks;
+        private const int PumpNonTargetableThreshold = 30; // ~0.5s sustained before trusting
 
         // Chest ID→position mapping (needed for removal by event)
         private readonly Dictionary<long, Vector2> _chestEntityPositions = new();
@@ -132,6 +141,7 @@ namespace AutoExile.Systems
             _lastCoverageUpdateAt = DateTime.MinValue;
             _prevTowerBuildAt = DateTime.MinValue;
             _prevTowerUpgradeAt = DateTime.MinValue;
+            _pumpNonTargetableTicks = 0;
             PortalPosition = null;
             MapComplete = false;
             DeathCount = 0;
@@ -362,8 +372,20 @@ namespace AutoExile.Systems
 
                 // Fallback: non-targetable pump means the encounter has been activated.
                 // The "activated" StateMachine state may not stay >0 for the entire encounter.
-                if (!IsEncounterActive && !entity.IsTargetable)
-                    IsEncounterActive = true;
+                // Require sustained non-targetable to avoid transient false positives.
+                if (!IsEncounterActive)
+                {
+                    if (!entity.IsTargetable)
+                    {
+                        _pumpNonTargetableTicks++;
+                        if (_pumpNonTargetableTicks >= PumpNonTargetableThreshold)
+                            IsEncounterActive = true;
+                    }
+                    else
+                    {
+                        _pumpNonTargetableTicks = 0;
+                    }
+                }
                 break;
             }
         }
@@ -438,8 +460,21 @@ namespace AutoExile.Systems
                     // Fallback: non-targetable pump means encounter is active.
                     // The "activated" state is a trigger that may not stay >0 for the
                     // entire encounter — once set, IsEncounterActive should never flip back.
-                    if (!IsEncounterActive && !entity.IsTargetable)
-                        IsEncounterActive = true;
+                    // Require sustained non-targetable state to avoid transient false positives
+                    // (e.g., blink animations, entity refresh, momentary targeting loss).
+                    if (!IsEncounterActive)
+                    {
+                        if (!entity.IsTargetable)
+                        {
+                            _pumpNonTargetableTicks++;
+                            if (_pumpNonTargetableTicks >= PumpNonTargetableThreshold)
+                                IsEncounterActive = true;
+                        }
+                        else
+                        {
+                            _pumpNonTargetableTicks = 0;
+                        }
+                    }
                     continue;
                 }
             }
@@ -466,6 +501,7 @@ namespace AutoExile.Systems
 
         private void TrackLanes(GameController gc)
         {
+            LaneTracker.PumpPosition = PumpPosition;
             LaneTracker.Tick(gc);
 
             if (IsEncounterActive && LaneTracker.HasLaneData)
@@ -581,15 +617,15 @@ namespace AutoExile.Systems
             PumpUnderAttack = false;
             AliveMonsterCount = 0;
 
-            if (!PumpPosition.HasValue) return;
-            var pumpPos = PumpPosition.Value;
+            if (!DefensePosition.HasValue) return;
+            var defensePos = DefensePosition.Value;
 
             foreach (var cm in CachedMonsters.Values)
             {
                 if (!cm.AssumedAlive) continue;
                 AliveMonsterCount++;
 
-                if (!PumpUnderAttack && Vector2.Distance(cm.Position, pumpPos) < PumpDangerRadius)
+                if (!PumpUnderAttack && Vector2.Distance(cm.Position, defensePos) < PumpDangerRadius)
                     PumpUnderAttack = true;
             }
         }

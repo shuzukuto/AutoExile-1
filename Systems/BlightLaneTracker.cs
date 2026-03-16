@@ -19,6 +19,14 @@ namespace AutoExile.Systems
         public List<List<Vector2>> Lanes { get; private set; } = new();
         public int TotalPathways { get; private set; }
 
+        /// <summary>
+        /// The grid position where multiple lanes converge — the actual point monsters
+        /// attack. This is NOT the clickable pump entity position. Computed as the pathway
+        /// position with the most overlapping entities (the hub/root of all lanes).
+        /// Null until lanes are reconstructed with pathway data.
+        /// </summary>
+        public Vector2? HubPosition { get; private set; }
+
         // Per-lane intelligence (indices match Lanes list)
         public float[] LaneThreat { get; private set; } = Array.Empty<float>();
         public float[] LaneCoverage { get; private set; } = Array.Empty<float>();
@@ -75,6 +83,12 @@ namespace AutoExile.Systems
             "FlyingMinionTower", "TankyMinionTower",
             "BuffPlayersTower", "WeakenEnemiesTower",
         };
+
+        /// <summary>
+        /// Pump grid position — set by BlightState so hub computation can prefer
+        /// the convergence point closest to the pump rather than an arbitrary branch point.
+        /// </summary>
+        public Vector2? PumpPosition { get; set; }
 
         public bool HasLaneData => Lanes.Count > 0;
 
@@ -164,6 +178,57 @@ namespace AutoExile.Systems
             LaneThreat = new float[Lanes.Count];
             LaneCoverage = new float[Lanes.Count];
             LaneDanger = new float[Lanes.Count];
+
+            // Compute hub position — the pathway grid cell with the most overlapping entities.
+            // This is where all lanes converge and where monsters actually attack.
+            ComputeHubPosition(pathways);
+        }
+
+        private void ComputeHubPosition(List<(long Id, Vector2 Pos)> pathways)
+        {
+            // Count how many pathway entities share each grid cell (rounded to int)
+            var cellCounts = new Dictionary<(int X, int Y), (int Count, Vector2 Pos)>();
+            foreach (var (_, pos) in pathways)
+            {
+                var key = ((int)MathF.Round(pos.X), (int)MathF.Round(pos.Y));
+                if (cellCounts.TryGetValue(key, out var existing))
+                    cellCounts[key] = (existing.Count + 1, pos);
+                else
+                    cellCounts[key] = (1, pos);
+            }
+
+            // Among cells with 3+ overlapping pathways, pick the one closest to the pump.
+            // Pathways can overlap at branch points far from the pump — we want the root
+            // convergence, not an arbitrary intersection.
+            var pumpRef = PumpPosition ?? Vector2.Zero;
+            var hasPump = PumpPosition.HasValue;
+            float bestScore = float.MaxValue;
+            Vector2? bestPos = null;
+            foreach (var (_, (count, pos)) in cellCounts)
+            {
+                if (count < 3) continue;
+
+                if (hasPump)
+                {
+                    var dist = Vector2.Distance(pos, pumpRef);
+                    if (dist < bestScore)
+                    {
+                        bestScore = dist;
+                        bestPos = pos;
+                    }
+                }
+                else
+                {
+                    // No pump reference — fall back to highest overlap count
+                    if (count > bestScore || bestPos == null)
+                    {
+                        bestScore = count;
+                        bestPos = pos;
+                    }
+                }
+            }
+
+            HubPosition = bestPos;
         }
 
         /// <summary>

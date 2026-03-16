@@ -264,6 +264,9 @@ namespace AutoExile
 
             [Menu("Ignore Quest Items", "Skip quest items (heist contracts, etc.) during loot pickup.")]
             public ToggleNode IgnoreQuestItems { get; set; } = new ToggleNode(true);
+
+            [Menu("Stash Cooldown (ms)", "Delay between each Ctrl+click when stashing items.")]
+            public RangeNode<int> StashItemCooldownMs { get; set; } = new RangeNode<int>(450, 200, 1000);
         }
 
         [Submenu(CollapsedByDefault = true)]
@@ -280,9 +283,6 @@ namespace AutoExile
 
             [Menu("Stash Item Threshold", "Stash items between waves when inventory has this many items.")]
             public RangeNode<int> StashItemThreshold { get; set; } = new RangeNode<int>(5, 1, 30);
-
-            [Menu("Stash Cooldown (ms)", "Delay between each Ctrl+click when stashing items.")]
-            public RangeNode<int> StashItemCooldownMs { get; set; } = new RangeNode<int>(450, 200, 1000);
         }
 
         [Submenu(CollapsedByDefault = true)]
@@ -311,9 +311,6 @@ namespace AutoExile
 
             [Menu("Sweep Pump Radius", "Grid distance from pump considered 'near pump' — resets the return timer when inside this radius.")]
             public RangeNode<float> SweepPumpRadius { get; set; } = new RangeNode<float>(80f, 30f, 150f);
-
-            [Menu("Stash Item Cooldown (ms)", "Delay between each Ctrl+click when stashing items.")]
-            public RangeNode<int> StashItemCooldownMs { get; set; } = new RangeNode<int>(450, 200, 1000);
 
             public TowerTypeSettings Chilling { get; set; } = new TowerTypeSettings(5, canStack: false, tier3Branch: "None");
             public TowerTypeSettings Fireball { get; set; } = new TowerTypeSettings(4, canStack: true, tier3Branch: "Left");
