@@ -530,7 +530,7 @@ namespace AutoExile
             // ── Risk management ──
 
             [Menu("Max Waves", "Maximum wave to push to before taking rewards.")]
-            public RangeNode<int> MaxWaves { get; set; } = new RangeNode<int>(10, 1, 10);
+            public RangeNode<int> MaxWaves { get; set; } = new RangeNode<int>(13, 1, 13);
 
             [Menu("Danger Threshold", "Take rewards when cumulative modifier danger exceeds this. Higher = more risk tolerance. Each mod is 1-5 danger, so 30 ≈ 10 medium mods.")]
             public RangeNode<int> DangerThreshold { get; set; } = new RangeNode<int>(30, 5, 100);
